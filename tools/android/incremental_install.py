@@ -33,6 +33,7 @@ from third_party.py.concurrent import futures
 gflags.DEFINE_string("split_main_apk", None, "The main APK for split install")
 gflags.DEFINE_multistring("split_apk", [], "Split APKs to install")
 gflags.DEFINE_string("dexmanifest", None, "The .dex manifest")
+gflags.DEFINE_multistring("native_lib", None, "Native libraries to install")
 gflags.DEFINE_string("resource_apk", None, "The resource .apk")
 gflags.DEFINE_string("apk", None, "The app .apk. If not specified, "
                      "do incremental deployment")
@@ -45,8 +46,11 @@ gflags.DEFINE_integer("adb_jobs", 2,
                       "The number of instances of adb to use in parallel to "
                       "update files on the device",
                       lower_bound=1)
-gflags.DEFINE_boolean("start_app", False, "Whether to start the app after "
-                      "installing it.")
+gflags.DEFINE_enum("start", "no", ["no", "cold", "warm"], "Whether/how to "
+                   "start the app after installing it. 'cold' and 'warm' will "
+                   "both cause the app to be started, 'warm' will start it "
+                   "with previously saved application state.")
+gflags.DEFINE_boolean("start_app", False, "Deprecated, use 'start'.")
 gflags.DEFINE_string("user_home_dir", None, "Path to the user's home directory")
 gflags.DEFINE_string("flagfile", None,
                      "Path to a file to read additional flags from")
@@ -171,6 +175,11 @@ class Adb(object):
           "non-incremental 'mobile-install' must precede incremental "
           "installs." % package)
 
+  def GetAbi(self):
+    """Returns the ABI the device supports."""
+    _, stdout, _, _ = self._Shell("getprop ro.product.cpu.abi")
+    return stdout
+
   def Push(self, local, remote):
     """Invoke 'adb push' in parallel."""
     return self._ExecParallel(["push", local, remote])
@@ -240,6 +249,14 @@ class Adb(object):
   def StopApp(self, package):
     """Force stops the app with the given package."""
     self._Shell("am force-stop %s" % package)
+
+  def StopAppAndSaveState(self, package):
+    """Stops the app with the given package, saving state for the next run."""
+    # 'am kill' will only kill processes in the background, so we must make sure
+    # our process is in the background first. We accomplish this by bringing up
+    # the app switcher.
+    self._Shell("input keyevent KEYCODE_APP_SWITCH")
+    self._Shell("am kill %s" % package)
 
   def StartApp(self, package):
     """Starts the app with the given package."""
@@ -436,6 +453,100 @@ def UploadResources(adb, resource_apk, app_dir):
   adb.PushString(new_checksum, device_checksum_file).result()
 
 
+def ConvertNativeLibs(args):
+  """Converts the --native_libs command line argument to an arch -> libs map."""
+  native_libs = {}
+  if args is not None:
+    for native_lib in args:
+      abi, path = native_lib.split(":")
+      if abi not in native_libs:
+        native_libs[abi] = set()
+
+      native_libs[abi].add(path)
+
+  return native_libs
+
+
+def UploadNativeLibs(adb, native_lib_args, app_dir, full_install):
+  """Uploads native libraries to the device."""
+
+  native_libs = ConvertNativeLibs(native_lib_args)
+  libs = set()
+  if native_libs:
+    abi = adb.GetAbi()
+    if abi not in native_libs:
+      logging.warn("No native libs for device ABI '%s'. Available ABIs: %s",
+                   abi, ", ".join(native_libs))
+    else:
+      libs = native_libs[abi]
+
+  basename_to_path = {}
+  install_checksums = {}
+  for lib in sorted(libs):
+    install_checksums[os.path.basename(lib)] = Checksum(lib)
+    basename_to_path[os.path.basename(lib)] = lib
+
+  device_manifest = None
+  if not full_install:
+    device_manifest = adb.Pull("%s/native/native_manifest" % app_dir)
+
+  device_checksums = {}
+  if device_manifest is None:
+    # If we couldn't fetch the device manifest or if this is a non-incremental
+    # install, wipe the slate clean
+    adb.Delete("%s/native" % app_dir)
+  else:
+    # Otherwise, parse the manifest. Note that this branch is also taken if the
+    # manifest is empty.
+    for name, checksum in [
+        l.split(" ") for l in device_manifest.split("\n") if l]:
+      device_checksums[name] = checksum
+
+  libs_to_delete = set(device_checksums) - set(install_checksums)
+  libs_to_upload = set(install_checksums) - set(device_checksums)
+  common_libs = set(install_checksums).intersection(set(device_checksums))
+  libs_to_upload.update([l for l in common_libs
+                         if install_checksums[l] != device_checksums[l]])
+
+  libs_to_push = [(basename_to_path[lib], "%s/native/%s" % (app_dir, lib))
+                  for lib in libs_to_upload]
+
+  if not libs_to_delete and not libs_to_push and device_manifest is not None:
+    logging.info("Native libs up-to-date")
+    return
+
+  num_files = len(libs_to_delete) + len(libs_to_push)
+  logging.info("Updating %d native lib%s...",
+               num_files, "s" if num_files != 1 else "")
+
+  adb.Delete("%s/native/native_manifest" % app_dir)
+
+  if libs_to_delete:
+    adb.DeleteMultiple([
+        "%s/native/%s" % (app_dir, lib) for lib in libs_to_delete])
+
+  upload_walltime_start = time.time()
+  fs = [adb.Push(local, remote) for local, remote in libs_to_push]
+  done, not_done = futures.wait(fs, return_when=futures.FIRST_EXCEPTION)
+  upload_walltime = time.time() - upload_walltime_start
+  logging.debug("Native library upload walltime: %s seconds", upload_walltime)
+
+  # If there is anything in not_done, then some adb call failed and we
+  # can cancel the rest.
+  if not_done:
+    for f in not_done:
+      f.cancel()
+
+  # If any adb call resulted in an exception, re-raise it.
+  for f in done:
+    f.result()
+
+  install_manifest = [
+      name + " " + checksum for name, checksum in install_checksums.iteritems()]
+  adb.PushString("\n".join(install_manifest),
+                 "%s/native/native_manifest" % app_dir).result()
+
+
 def VerifyInstallTimestamp(adb, app_package):
   """Verifies that the app is unchanged since the last mobile-install."""
   expected_timestamp = adb.Pull("%s/%s/install_timestamp" % (
@@ -453,8 +564,9 @@ def VerifyInstallTimestamp(adb, app_package):
 
 
 def IncrementalInstall(adb_path, execroot, stub_datafile, output_marker,
-                       adb_jobs, start_app, dexmanifest=None, apk=None,
-                       resource_apk=None, split_main_apk=None, split_apks=None,
+                       adb_jobs, start_type, dexmanifest=None, apk=None,
+                       native_libs=None, resource_apk=None,
+                       split_main_apk=None, split_apks=None,
                        user_home_dir=None):
   """Performs an incremental install.
 
@@ -464,9 +576,11 @@ def IncrementalInstall(adb_path, execroot, stub_datafile, output_marker,
     stub_datafile: The stub datafile containing the app's package name.
     output_marker: Path to the output marker file.
     adb_jobs: The number of instances of adb to use in parallel.
-    start_app: If True, starts the app after updating.
+    start_type: A string describing whether/how to start the app after
+                installing it. Can be 'no', 'cold', or 'warm'.
     dexmanifest: Path to the .dex manifest file.
     apk: Path to the .apk file. May be None to perform an incremental install.
+    native_libs: Native libraries to install.
     resource_apk: Path to the apk containing the app's resources.
     split_main_apk: the split main .apk if split installation is desired.
     split_apks: the list of split .apks to be installed.
@@ -480,6 +594,8 @@ def IncrementalInstall(adb_path, execroot, stub_datafile, output_marker,
     if split_main_apk:
       adb.InstallMultiple(os.path.join(execroot, split_main_apk))
       for split_apk in split_apks:
+        # TODO(build-team): This always reinstalls everything, which defeats the
+        # purpose of this whole system.
         adb.InstallMultiple(os.path.join(execroot, split_apk), app_package)
     else:
       if not apk:
@@ -492,6 +608,7 @@ def IncrementalInstall(adb_path, execroot, stub_datafile, output_marker,
       # then UploadResources is called. We could instead enqueue everything
       # onto the threadpool so that uploading resources happens sooner.
       UploadResources(adb, os.path.join(execroot, resource_apk), app_dir)
+      UploadNativeLibs(adb, native_libs, app_dir, bool(apk))
       if apk:
         apk_path = os.path.join(execroot, apk)
         adb.Install(apk_path)
@@ -501,9 +618,12 @@ def IncrementalInstall(adb_path, execroot, stub_datafile, output_marker,
         future.result()
 
       else:
-        adb.StopApp(app_package)
+        if start_type == "warm":
+          adb.StopAppAndSaveState(app_package)
+        else:
+          adb.StopApp(app_package)
 
-    if start_app:
+    if start_type in ["cold", "warm"]:
       logging.info("Starting application %s", app_package)
       adb.StartApp(app_package)
 
@@ -535,13 +655,18 @@ def main():
     fmt = "%(message)s"
   logging.basicConfig(stream=sys.stdout, level=level, format=fmt)
 
+  start_type = FLAGS.start
+  if FLAGS.start_app and start_type == "no":
+    start_type = "cold"
+
   IncrementalInstall(
       adb_path=FLAGS.adb,
       adb_jobs=FLAGS.adb_jobs,
       execroot=FLAGS.execroot,
       stub_datafile=FLAGS.stub_datafile,
       output_marker=FLAGS.output_marker,
-      start_app=FLAGS.start_app,
+      start_type=start_type,
+      native_libs=FLAGS.native_lib,
       split_main_apk=FLAGS.split_main_apk,
       split_apks=FLAGS.split_apk,
       dexmanifest=FLAGS.dexmanifest,

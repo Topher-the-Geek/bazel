@@ -168,7 +168,7 @@ public final class CcLibraryHelper {
   private final List<PathFragment> looseIncludeDirs = new ArrayList<>();
   private final List<PathFragment> systemIncludeDirs = new ArrayList<>();
   private final List<PathFragment> includeDirs = new ArrayList<>();
-  @Nullable private PathFragment dynamicLibraryPath;
+  @Nullable private Artifact dynamicLibrary;
   private LinkTargetType linkType = LinkTargetType.STATIC_LIBRARY;
   private HeadersCheckingMode headersCheckingMode = HeadersCheckingMode.LOOSE;
   private boolean neverlink;
@@ -185,7 +185,7 @@ public final class CcLibraryHelper {
   private boolean emitDynamicLibrary = true;
   private boolean checkDepsGenerateCpp = true;
   private boolean emitCompileProviders;
-  
+
   private final FeatureConfiguration featureConfiguration;
 
   public CcLibraryHelper(RuleContext ruleContext, CppSemantics semantics,
@@ -195,7 +195,24 @@ public final class CcLibraryHelper {
     this.semantics = Preconditions.checkNotNull(semantics);
     this.featureConfiguration = Preconditions.checkNotNull(featureConfiguration);
   }
-  
+
+  /**
+   * Sets fields that overlap for cc_library and cc_binary rules.
+   */
+  public CcLibraryHelper fromCommon(CcCommon common) {
+    this
+        .addCopts(common.getCopts())
+        .addDefines(common.getDefines())
+        .addDeps(ruleContext.getPrerequisites("deps", Mode.TARGET))
+        .addIncludeDirs(common.getIncludeDirs())
+        .addLooseIncludeDirs(common.getLooseIncludeDirs())
+        .addPicIndependentObjectFiles(common.getLinkerScripts())
+        .addSystemIncludeDirs(common.getSystemIncludeDirs())
+        .setNoCopts(common.getNoCopts())
+        .setHeadersCheckingMode(common.determineHeadersCheckingMode());
+    return this;
+  }
+
   /**
    * Add the corresponding files as header files, i.e., these files will not be compiled, but are
    * made visible as includes to dependent rules.
@@ -243,7 +260,7 @@ public final class CcLibraryHelper {
     }
     return this;
   }
-  
+
   /**
    * Add the corresponding files as source files. These may also be header files, in which case
    * they will not be compiled, but also not made visible as includes to dependent rules.
@@ -408,6 +425,19 @@ public final class CcLibraryHelper {
   }
 
   /**
+   * Adds the given precompiled files to this helper. Shared and static libraries are added as
+   * compilation prerequisites, and object files are added as pic or non-pic object files
+   * respectively.
+   */
+  public CcLibraryHelper addPrecompiledFiles(PrecompiledFiles precompiledFiles) {
+    addCompilationPrerequisites(precompiledFiles.getSharedLibraries());
+    addCompilationPrerequisites(precompiledFiles.getStaticLibraries());
+    addObjectFiles(precompiledFiles.getObjectFiles(false));
+    addPicObjectFiles(precompiledFiles.getObjectFiles(true));
+    return this;
+  }
+
+  /**
    * Adds the given directories to the loose include directories that are only allowed to be
    * referenced when headers checking is {@link HeadersCheckingMode#LOOSE} or {@link
    * HeadersCheckingMode#WARN}.
@@ -440,8 +470,8 @@ public final class CcLibraryHelper {
    * dynamic library is an implicit or explicit output of the rule, i.e., if it is accessible by
    * name from other rules in the same package. Set to {@code null} to use the default computation.
    */
-  public CcLibraryHelper setDynamicLibraryPath(@Nullable PathFragment dynamicLibraryPath) {
-    this.dynamicLibraryPath = dynamicLibraryPath;
+  public CcLibraryHelper setDynamicLibrary(@Nullable Artifact dynamicLibrary) {
+    this.dynamicLibrary = dynamicLibrary;
     return this;
   }
 
@@ -598,7 +628,7 @@ public final class CcLibraryHelper {
         // configurations --save_temps setting to decide whether to actually save the temps.
         .setSaveTemps(true)
         .setNoCopts(nocopts)
-        .setDynamicLibraryPath(dynamicLibraryPath)
+        .setDynamicLibrary(dynamicLibrary)
         .addLinkopts(linkopts)
         .setFeatureConfiguration(featureConfiguration);
     CppCompilationContext cppCompilationContext =

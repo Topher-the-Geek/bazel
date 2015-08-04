@@ -274,7 +274,7 @@ public final class SkylarkRuleContext {
   @SkylarkCallable(name = "executable", structField = true,
       doc = "A <code>struct</code> containing executable files defined in label type "
           + "attributes marked as <code>executable=True</code>. The struct fields correspond "
-          + "to the attribute names. The struct value is always a <code>file</code>s or "
+          + "to the attribute names. Each struct value is always a <code>file</code>s or "
           + "<code>None</code>. If an optional attribute is not specified in the rule "
           + "then the corresponding struct value is <code>None</code>. If a label type is not "
           + "marked as <code>executable=True</code>, no corresponding struct field is generated.")
@@ -345,12 +345,12 @@ public final class SkylarkRuleContext {
           + " The struct is generated the following way:<br>"
           + "<ul><li>If the rule is marked as <code>executable=True</code> the struct has an "
           + "\"executable\" field with the rules default executable <code>file</code> value."
-          + "<li>For every entry in the rule's <code>outputs</code> dict a field is generated with "
+          + "<li>For every entry in the rule's <code>outputs</code> dict an attr is generated with "
           + "the same name and the corresponding <code>file</code> value."
-          + "<li>For every output type attribute a struct field is generated with the "
+          + "<li>For every output type attribute a struct attribute is generated with the "
           + "same name and the corresponding <code>file</code> value or <code>None</code>, "
           + "if no value is specified in the rule."
-          + "<li>For every output list type attribute a struct field is generated with the "
+          + "<li>For every output list type attribute a struct attribute is generated with the "
           + "same name and corresponding <code>list</code> of <code>file</code>s value "
           + "(an empty list if no value is specified in the rule).</ul>")
   public SkylarkClassObject outputs() {
@@ -398,31 +398,29 @@ public final class SkylarkRuleContext {
 
   @SkylarkCallable(doc = "Creates a file object with the given filename. " + DOC_NEW_FILE_TAIL)
   public Artifact newFile(String filename) {
-    PathFragment fragment = ruleContext.getLabel().getPackageFragment();
-    for (String pathFragmentString : filename.split("/")) {
-      fragment = fragment.getRelative(pathFragmentString);
-    }
-    Root root = ruleContext.getBinOrGenfilesDirectory();
-    return ruleContext.getAnalysisEnvironment().getDerivedArtifact(fragment, root);
+    return newFile(ruleContext.getBinOrGenfilesDirectory(), filename);
   }
 
   // Kept for compatibility with old code.
   @SkylarkCallable(documented = false)
   public Artifact newFile(Root root, String filename) {
-    PathFragment fragment = ruleContext.getLabel().getPackageFragment();
-    for (String pathFragmentString : filename.split("/")) {
-      fragment = fragment.getRelative(pathFragmentString);
-    }
-    return ruleContext.getAnalysisEnvironment().getDerivedArtifact(fragment, root);
+    return ruleContext.getPackageRelativeArtifact(filename, root);
   }
 
-  @SkylarkCallable(doc = "Creates a new file object, derived from the given file and suffix. "
-      + DOC_NEW_FILE_TAIL)
+  @SkylarkCallable(doc =
+      "Creates a new file object, derived from the given file and suffix. " + DOC_NEW_FILE_TAIL)
+  public Artifact newFileSuffix(Artifact baseArtifact, String suffix) {
+    return newFile(baseArtifact, suffix);
+  }
+
+  @SkylarkCallable(doc =
+      "Creates a new file object, derived from the given file and suffix. " + DOC_NEW_FILE_TAIL
+      + " Deprecated: Please use ctx.new_file_suffix() instead.")
   public Artifact newFile(Artifact baseArtifact, String suffix) {
     PathFragment original = baseArtifact.getRootRelativePath();
     PathFragment fragment = original.replaceName(original.getBaseName() + suffix);
     Root root = ruleContext.getBinOrGenfilesDirectory();
-    return ruleContext.getAnalysisEnvironment().getDerivedArtifact(fragment, root);
+    return ruleContext.getDerivedArtifact(fragment, root);
   }
 
   // Kept for compatibility with old code.
@@ -430,7 +428,7 @@ public final class SkylarkRuleContext {
   public Artifact newFile(Root root, Artifact baseArtifact, String suffix) {
     PathFragment original = baseArtifact.getRootRelativePath();
     PathFragment fragment = original.replaceName(original.getBaseName() + suffix);
-    return ruleContext.getAnalysisEnvironment().getDerivedArtifact(fragment, root);
+    return ruleContext.getDerivedArtifact(fragment, root);
   }
 
   @SkylarkCallable(documented = false)

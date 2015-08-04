@@ -20,6 +20,7 @@ import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
+import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -62,6 +63,8 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.analysis.RunfilesSupport;
+import com.google.devtools.build.lib.analysis.SourceManifestAction;
+import com.google.devtools.build.lib.analysis.SymlinkTreeAction;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
 import com.google.devtools.build.lib.analysis.WorkspaceStatusAction;
@@ -107,6 +110,7 @@ import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.DiffAwareness;
 import com.google.devtools.build.lib.skyframe.PrecomputedValue;
 import com.google.devtools.build.lib.skyframe.SequencedSkyframeExecutor;
+import com.google.devtools.build.lib.skyframe.SkyValueDirtinessChecker;
 import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.syntax.Label.SyntaxException;
 import com.google.devtools.build.lib.testutil.FoundationTestCase;
@@ -139,6 +143,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -186,18 +191,21 @@ public abstract class BuildViewTestCase extends FoundationTestCase {
         new AnalysisTestUtil.DummyWorkspaceStatusActionFactory(directories);
     mutableActionGraph = new MapBasedActionGraph();
     ruleClassProvider = getRuleClassProvider();
-    skyframeExecutor = SequencedSkyframeExecutor.create(reporter,
-        new PackageFactory(ruleClassProvider, getEnvironmentExtensions()),
-        new TimestampGranularityMonitor(BlazeClock.instance()), directories,
-        workspaceStatusActionFactory,
-        ruleClassProvider.getBuildInfoFactories(),
-        ImmutableSet.<Path>of(),
-        ImmutableList.<DiffAwareness.Factory>of(),
-        Predicates.<PathFragment>alwaysFalse(),
-        getPreprocessorFactorySupplier(),
-        ImmutableMap.<SkyFunctionName, SkyFunction>of(),
-        getPrecomputedValues()
-    );
+    skyframeExecutor =
+        SequencedSkyframeExecutor.create(
+            reporter,
+            new PackageFactory(ruleClassProvider, getEnvironmentExtensions()),
+            new TimestampGranularityMonitor(BlazeClock.instance()),
+            directories,
+            workspaceStatusActionFactory,
+            ruleClassProvider.getBuildInfoFactories(),
+            ImmutableSet.<Path>of(),
+            ImmutableList.<DiffAwareness.Factory>of(),
+            Predicates.<PathFragment>alwaysFalse(),
+            getPreprocessorFactorySupplier(),
+            ImmutableMap.<SkyFunctionName, SkyFunction>of(),
+            getPrecomputedValues(),
+            ImmutableList.<SkyValueDirtinessChecker>of());
     skyframeExecutor.preparePackageLoading(
         new PathPackageLocator(rootDirectory), ConstantRuleVisibility.PUBLIC, true, 7, "",
         UUID.randomUUID());
@@ -383,6 +391,47 @@ public abstract class BuildViewTestCase extends FoundationTestCase {
    */
   protected Iterable<ConfiguredTarget> getDirectPrerequisites(ConfiguredTarget target) {
     return view.getDirectPrerequisites(target);
+  }
+
+  /**
+   * Asserts that a target's prerequisites contain the given dependency.
+   */
+  // TODO(bazel-team): replace this method with assertThat(iterable).contains(target).
+  // That doesn't work now because dynamic configurations aren't yet applied to top-level targets.
+  // This means that getConfiguredTarget("//go:two") returns a different configuration than
+  // requesting "//go:two" as a dependency. So the configured targets aren't considered "equal".
+  // Once we apply dynamic configs to top-level targets this discrepancy will go away.
+  protected void assertDirectPrerequisitesContain(ConfiguredTarget target, ConfiguredTarget dep) {
+    Iterable<ConfiguredTarget> prereqs = getDirectPrerequisites(target);
+    BuildConfiguration depConfig = dep.getConfiguration();
+    for (ConfiguredTarget contained : prereqs) {
+      if (contained.getLabel().equals(dep.getLabel())) {
+        BuildConfiguration containedConfig = contained.getConfiguration();
+        if (containedConfig == null && depConfig == null) {
+          return;
+        } else if (containedConfig != null
+            && depConfig != null
+            && containedConfig.cloneOptions().equals(depConfig.cloneOptions())) {
+          return;
+        }
+      }
+    }
+    fail("Cannot find " + target.toString() + " in " + prereqs.toString());
+  }
+
+  /**
+   * Asserts that two configurations are the same.
+   *
+   * <p>Historically this meant they contained the same object reference. But with upcoming dynamic
+   * configurations that may no longer be true (for example, they may have the same values but not
+   * the same {@link BuildConfiguration.Fragment}s. So this method abstracts the
+   * "configuration equivalency" checking into one place, where the implementation logic can evolve
+   * as needed.
+   */
+  protected void assertConfigurationsEqual(BuildConfiguration config1, BuildConfiguration config2) {
+    // BuildOptions and crosstool files determine a configuration's content. Within the context
+    // of these tests only the former actually change.
+    assertEquals(config1.cloneOptions(), config2.cloneOptions());
   }
 
   /**
@@ -1195,7 +1244,7 @@ public abstract class BuildViewTestCase extends FoundationTestCase {
   }
 
   protected BuildConfiguration getHostConfiguration() {
-    return getTargetConfiguration().getConfiguration(ConfigurationTransition.HOST);
+    return masterConfig.getHostConfiguration();
   }
 
   /**
@@ -1505,5 +1554,29 @@ public abstract class BuildViewTestCase extends FoundationTestCase {
    */
   private String convertLabelToPath(String label) {
     return label.replace(':', '/').substring(1);
+  }
+
+  protected Map<String, String> getSymlinkTreeManifest(Artifact outputManifest) throws Exception {
+    SymlinkTreeAction symlinkTreeAction = (SymlinkTreeAction) getGeneratingAction(outputManifest);
+    Artifact inputManifest = Iterables.getOnlyElement(symlinkTreeAction.getInputs());
+    SourceManifestAction inputManifestAction =
+        (SourceManifestAction) getGeneratingAction(inputManifest);
+        // Ask the manifest to write itself to a byte array so that we can
+    // read its contents.
+    ByteArrayOutputStream stream = new ByteArrayOutputStream();
+    inputManifestAction.writeOutputFile(stream, reporter);
+    String contents = stream.toString();
+
+    // Get the file names from the manifest output.
+    ImmutableMap.Builder<String, String> result = ImmutableMap.builder();
+    for (String line : Splitter.on('\n').split(contents)) {
+      int space = line.indexOf(' ');
+      if (space < 0) {
+        continue;
+      }
+      result.put(line.substring(0, space), line.substring(space + 1));
+    }
+
+    return result.build();
   }
 }

@@ -662,6 +662,16 @@ public class CppConfiguration extends BuildConfiguration.Fragment {
     this.additionalMakeVariables = ImmutableMap.copyOf(makeVariablesBuilder);
   }
 
+  @Override
+  public boolean isSkylarkVisible() {
+    return true;
+  }
+
+  @Override
+  public String getName() {
+    return "cpp";
+  }
+
   private List<OptionalFlag> convertOptionalOptions(
           List<CrosstoolConfig.CToolchain.OptionalFlag> optionalFlagList)
       throws IllegalArgumentException {
@@ -1806,7 +1816,7 @@ public class CppConfiguration extends BuildConfiguration.Fragment {
   }
 
   @Override
-  public ImmutableList<Label> getCoverageLabels() {
+  public ImmutableList<Label> getGcovLabels() {
     // TODO(bazel-team): Using a gcov-specific crosstool filegroup here could reduce the number of
     // inputs significantly. We'd also need to add logic in tools/coverage/collect_coverage.sh to
     // drop crosstool dependency if metadataFiles does not contain *.gcno artifacts.

@@ -129,7 +129,6 @@ public class JavaCompilationHelper extends BaseJavaCompilationHelper {
     builder.setJavacOpts(customJavacOpts);
     builder.setJavacJvmOpts(customJavacJvmOpts);
     builder.setCompressJar(true);
-    builder.setClassDirectory(outputDir(outputJar));
     builder.setSourceGenDirectory(sourceGenDir(outputJar));
     builder.setTempDirectory(tempDir(outputJar));
     builder.addProcessorPaths(attributes.getProcessorPath());
@@ -201,7 +200,7 @@ public class JavaCompilationHelper extends BaseJavaCompilationHelper {
    */
   public Artifact createGensrcJar(@Nullable Artifact outputJar) {
     if (usesAnnotationProcessing()) {
-      return getAnalysisEnvironment().getDerivedArtifact(
+      return getRuleContext().getDerivedArtifact(
           FileSystemUtils.appendWithoutExtension(outputJar.getRootRelativePath(), "-gensrc"),
           outputJar.getRoot());
     } else {
@@ -225,7 +224,7 @@ public class JavaCompilationHelper extends BaseJavaCompilationHelper {
    * @return The output artifact for the manifest proto emitted from JavaBuilder 
    */
   public Artifact createManifestProtoOutput(Artifact outputJar) {
-    return getAnalysisEnvironment().getDerivedArtifact(
+    return getRuleContext().getDerivedArtifact(
         FileSystemUtils.appendExtension(outputJar.getRootRelativePath(), "_manifest_proto"),
         outputJar.getRoot());
   }
@@ -277,7 +276,7 @@ public class JavaCompilationHelper extends BaseJavaCompilationHelper {
       return null;
     }
 
-    outputDepsProtoArtifact = getAnalysisEnvironment().getDerivedArtifact(
+    outputDepsProtoArtifact = getRuleContext().getDerivedArtifact(
           FileSystemUtils.replaceExtension(outputJar.getRootRelativePath(), ".jdeps"),
           outputJar.getRoot());
 
@@ -316,7 +315,6 @@ public class JavaCompilationHelper extends BaseJavaCompilationHelper {
     builder.setLangtoolsJar(getLangtoolsJar());
     builder.addTranslations(getTranslations());
     builder.setCompressJar(true);
-    builder.setClassDirectory(outputDir(resourceJar));
     builder.setTempDirectory(tempDir(resourceJar));
     builder.setJavaBuilderJar(getJavaBuilderJar());
     builder.setJavacOpts(getDefaultJavacOptsFromRule(getRuleContext()));

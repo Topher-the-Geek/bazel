@@ -390,8 +390,9 @@ public class BlazeCommandDispatcher {
     // codes can be re-introduced later even if blaze is invoked with --color=no. This is useful
     // for commands such as 'blaze run' where the output of the final executable shouldn't be
     // modified.
+    EventHandler ansiAllowingHandler = null;
     if (!eventHandlerOptions.useColor()) {
-      EventHandler ansiAllowingHandler = createEventHandler(colorfulOutErr, eventHandlerOptions);
+      ansiAllowingHandler = createEventHandler(colorfulOutErr, eventHandlerOptions);
       reporter.registerAnsiAllowingHandler(handler, ansiAllowingHandler);
     }
 
@@ -447,6 +448,10 @@ public class BlazeCommandDispatcher {
       System.setErr(savedErr);
       reporter.removeHandler(handler);
       releaseHandler(handler);
+      if (!eventHandlerOptions.useColor()) {
+        reporter.removeHandler(ansiAllowingHandler);
+        releaseHandler(ansiAllowingHandler);
+      }
       runtime.getTimestampGranularityMonitor().waitForTimestampGranularity(outErr);
     }
   }

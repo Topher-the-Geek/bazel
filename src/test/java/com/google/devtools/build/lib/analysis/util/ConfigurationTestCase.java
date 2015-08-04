@@ -28,7 +28,6 @@ import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.ConfigurationFactory;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
-import com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.Preprocessor;
 import com.google.devtools.build.lib.packages.util.MockToolsConfig;
@@ -37,6 +36,7 @@ import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.skyframe.DiffAwareness;
 import com.google.devtools.build.lib.skyframe.PrecomputedValue;
 import com.google.devtools.build.lib.skyframe.SequencedSkyframeExecutor;
+import com.google.devtools.build.lib.skyframe.SkyValueDirtinessChecker;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.testutil.FoundationTestCase;
 import com.google.devtools.build.lib.testutil.TestConstants;
@@ -92,16 +92,21 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
     pkgFactory = new PackageFactory(ruleClassProvider);
     AnalysisTestUtil.DummyWorkspaceStatusActionFactory workspaceStatusActionFactory =
         new AnalysisTestUtil.DummyWorkspaceStatusActionFactory(directories);
-    skyframeExecutor = SequencedSkyframeExecutor.create(reporter, pkgFactory,
-        new TimestampGranularityMonitor(BlazeClock.instance()), directories,
-        workspaceStatusActionFactory,
-        ruleClassProvider.getBuildInfoFactories(), ImmutableSet.<Path>of(),
-        ImmutableList.<DiffAwareness.Factory>of(),
-        Predicates.<PathFragment>alwaysFalse(),
-        Preprocessor.Factory.Supplier.NullSupplier.INSTANCE,
-        ImmutableMap.<SkyFunctionName, SkyFunction>of(),
-        ImmutableList.<PrecomputedValue.Injected>of()
-    );
+    skyframeExecutor =
+        SequencedSkyframeExecutor.create(
+            reporter,
+            pkgFactory,
+            new TimestampGranularityMonitor(BlazeClock.instance()),
+            directories,
+            workspaceStatusActionFactory,
+            ruleClassProvider.getBuildInfoFactories(),
+            ImmutableSet.<Path>of(),
+            ImmutableList.<DiffAwareness.Factory>of(),
+            Predicates.<PathFragment>alwaysFalse(),
+            Preprocessor.Factory.Supplier.NullSupplier.INSTANCE,
+            ImmutableMap.<SkyFunctionName, SkyFunction>of(),
+            ImmutableList.<PrecomputedValue.Injected>of(),
+            ImmutableList.<SkyValueDirtinessChecker>of());
 
     skyframeExecutor.preparePackageLoading(pkgLocator,
         Options.getDefaults(PackageCacheOptions.class).defaultVisibility, true,
@@ -157,7 +162,7 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
   }
 
   protected BuildConfiguration createHost(String... args) throws Exception {
-    return create(args).getConfiguration(ConfigurationTransition.HOST);
+    return createCollection(args).getHostConfiguration();
   }
 
   public void assertConfigurationsHaveUniqueOutputDirectories(

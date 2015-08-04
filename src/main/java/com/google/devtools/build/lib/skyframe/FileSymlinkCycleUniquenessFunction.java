@@ -13,33 +13,29 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
-import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.events.Event;
-import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyFunction;
-import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 
-/** A value builder that has the side effect of reporting a file symlink cycle. */
-public class FileSymlinkCycleUniquenessFunction implements SkyFunction {
-
-  @SuppressWarnings("unchecked")  // Cast from Object to ImmutableList<RootedPath>.
+/** A {@link SkyFunction} that has the side effect of reporting a file symlink cycle. */
+public class FileSymlinkCycleUniquenessFunction
+    extends AbstractFileSymlinkExceptionUniquenessFunction {
   @Override
-  public SkyValue compute(SkyKey skyKey, Environment env) {
-    StringBuilder cycleMessage = new StringBuilder("circular symlinks detected\n");
-    cycleMessage.append("[start of symlink cycle]\n");
-    for (RootedPath rootedPath : (ImmutableList<RootedPath>) skyKey.argument()) {
-      cycleMessage.append(rootedPath.asPath() + "\n");
-    }
-    cycleMessage.append("[end of symlink cycle]");
-    // The purpose of this value builder is the side effect of emitting an error message exactly
-    // once per build per unique cycle.
-    env.getListener().handle(Event.error(cycleMessage.toString()));
+  protected SkyValue getDummyValue() {
     return FileSymlinkCycleUniquenessValue.INSTANCE;
   }
 
   @Override
-  public String extractTag(SkyKey skyKey) {
-    return null;
+  protected String getConciseDescription() {
+    return "circular symlinks";
+  }
+
+  @Override
+  protected String getHeaderMessage() {
+    return "[start of symlink cycle]";
+  }
+
+  @Override
+  protected String getFooterMessage() {
+    return "[end of symlink cycle]";
   }
 }

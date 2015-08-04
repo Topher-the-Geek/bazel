@@ -467,7 +467,7 @@ genrule(
 EOF
   bazel fetch //external:best-turtle || fail "Fetch failed"
   bazel build //external:best-turtle &> $TEST_log || fail "First build failed"
-  assert_contains "Raphael" bazel-genfiles/tmnt
+  assert_contains "Raphael" bazel-genfiles/external/mutant/tmnt
 
   cat > mutant.BUILD <<EOF
 genrule(
@@ -478,7 +478,7 @@ genrule(
 )
 EOF
   bazel build //external:best-turtle &> $TEST_log || fail "Second build failed"
-  assert_contains "Michaelangelo" bazel-genfiles/tmnt
+  assert_contains "Michaelangelo" bazel-genfiles/external/mutant/tmnt
 }
 
 function test_local_deps() {
@@ -592,6 +592,26 @@ local_repository(
 EOF
 
   bazel build --nobuild @r//:bin || fail "build failed"
+}
+
+function test_output_file_in_local_repository() {
+  local r=$TEST_TMPDIR/r
+  rm -fr $r
+  mkdir $r
+  touch $r/WORKSPACE
+  cat > $r/BUILD <<'EOF'
+genrule(name="r", srcs=[], outs=["r.out"], cmd="touch $@")
+EOF
+
+  cat > WORKSPACE <<EOF
+local_repository(name="r", path="$r")
+EOF
+
+  cat > BUILD <<'EOF'
+genrule(name="m", srcs=["@r//:r.out"], outs=["m.out"], cmd="touch $@")
+EOF
+
+  bazel build //:m
 }
 
 run_suite "local repository tests"

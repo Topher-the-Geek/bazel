@@ -295,6 +295,8 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
         new DirectoryListingStateFunction(externalFilesHelper));
     map.put(SkyFunctions.FILE_SYMLINK_CYCLE_UNIQUENESS,
         new FileSymlinkCycleUniquenessFunction());
+    map.put(SkyFunctions.FILE_SYMLINK_INFINITE_EXPANSION_UNIQUENESS,
+        new FileSymlinkInfiniteExpansionUniquenessFunction());
     map.put(SkyFunctions.FILE, new FileFunction(pkgLocator, tsgm, externalFilesHelper));
     map.put(SkyFunctions.DIRECTORY_LISTING, new DirectoryListingFunction());
     map.put(SkyFunctions.PACKAGE_LOOKUP, new PackageLookupFunction(deletedPackages));
@@ -315,6 +317,7 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
         numPackagesLoaded));
     map.put(SkyFunctions.TARGET_MARKER, new TargetMarkerFunction());
     map.put(SkyFunctions.TRANSITIVE_TARGET, new TransitiveTargetFunction(ruleClassProvider));
+    map.put(SkyFunctions.TRANSITIVE_TRAVERSAL, new TransitiveTraversalFunction());
     map.put(SkyFunctions.CONFIGURED_TARGET,
         new ConfiguredTargetFunction(new BuildViewProvider()));
     map.put(SkyFunctions.ASPECT, new AspectFunction(new BuildViewProvider()));
@@ -396,7 +399,7 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
             // We evaluate in keepGoing mode because in the case that the graph does not store its
             // edges, nokeepGoing builds are not allowed, whereas keepGoing builds are always
             // permitted.
-            EvaluationResult<ActionLookupValue> result = buildDriver.evaluate(
+            EvaluationResult<SkyValue> result = buildDriver.evaluate(
                 ImmutableList.of(key), true, ResourceUsage.getAvailableProcessors(),
                 errorEventListener);
             if (!result.hasError()) {

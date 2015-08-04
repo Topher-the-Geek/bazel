@@ -28,16 +28,14 @@ import com.google.devtools.build.lib.actions.AbstractAction;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionExecutionException;
-import com.google.devtools.build.lib.actions.ActionInput;
-import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.BaseSpawn;
-import com.google.devtools.build.lib.actions.EnvironmentalExecException;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.Executor;
 import com.google.devtools.build.lib.actions.ParameterFile;
 import com.google.devtools.build.lib.actions.ResourceSet;
+import com.google.devtools.build.lib.actions.Root;
 import com.google.devtools.build.lib.actions.Spawn;
 import com.google.devtools.build.lib.actions.SpawnActionContext;
 import com.google.devtools.build.lib.actions.extra.ExtraActionInfo;
@@ -61,10 +59,8 @@ import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.ShellEscaper;
 import com.google.devtools.build.lib.util.StringCanonicalizer;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
-import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -76,7 +72,6 @@ import java.util.List;
  */
 @ThreadCompatible
 public class JavaCompileAction extends AbstractAction {
-
   private static final String GUID = "786e174d-ed97-4e79-9f61-ae74430714cf";
 
   private static final ResourceSet LOCAL_RESOURCES =
@@ -160,11 +155,6 @@ public class JavaCompileAction extends AbstractAction {
   private final ImmutableList<Artifact> compileTimeDependencyArtifacts;
 
   /**
-   * The java semantics to get the list of action outputs.
-   */
-  private final JavaSemantics semantics;
-
-  /**
    * Constructs an action to compile a set of Java source files to class files.
    *
    * @param owner the action owner, typically a java_* RuleConfiguredTarget.
@@ -198,8 +188,7 @@ public class JavaCompileAction extends AbstractAction {
                             List<String> javacOpts,
                             Collection<Artifact> directJars,
                             BuildConfiguration.StrictDepsMode strictJavaDeps,
-                            Collection<Artifact> compileTimeDependencyArtifacts,
-                            JavaSemantics semantics) {
+                            Collection<Artifact> compileTimeDependencyArtifacts) {
     super(owner, NestedSetBuilder.<Artifact>stableOrder()
             .addTransitive(classpathEntries)
             .addAll(processorPath)
@@ -233,7 +222,6 @@ public class JavaCompileAction extends AbstractAction {
     this.directJars = ImmutableList.copyOf(directJars);
     this.strictJavaDeps = strictJavaDeps;
     this.compileTimeDependencyArtifacts = ImmutableList.copyOf(compileTimeDependencyArtifacts);
-    this.semantics = semantics;
   }
 
   /**
@@ -356,31 +344,8 @@ public class JavaCompileAction extends AbstractAction {
       throws ActionExecutionException, InterruptedException {
     Executor executor = actionExecutionContext.getExecutor();
     try {
-      List<ActionInput> outputs = new ArrayList<>();
-      outputs.addAll(getOutputs());
-      // Add a few useful side-effect output files to the list to retrieve.
-      // TODO(bazel-team): Just make these Artifacts.
-      PathFragment classDirectory = getClassDirectory();
-      outputs.addAll(semantics.getExtraJavaCompileOutputs(classDirectory));
-      outputs.add(ActionInputHelper.fromPath(classDirectory.getChild("srclist").getPathString()));
-
-      try {
-        // Make sure the directories exist, else the distributor will bomb.
-        Path classDirectoryPath = executor.getExecRoot().getRelative(getClassDirectory());
-        FileSystemUtils.createDirectoryAndParents(classDirectoryPath);
-      } catch (IOException e) {
-        throw new EnvironmentalExecException(e.getMessage());
-      }
-
-      final ImmutableList<ActionInput> finalOutputs = ImmutableList.copyOf(outputs);
       Spawn spawn = new BaseSpawn(getCommand(), ImmutableMap.<String, String>of(),
-          ImmutableMap.<String, String>of(), this, LOCAL_RESOURCES) {
-        @Override
-        public Collection<? extends ActionInput> getOutputFiles() {
-          return finalOutputs;
-        }
-      };
-
+          ImmutableMap.<String, String>of(), this, LOCAL_RESOURCES);
       getContext(executor).exec(spawn, actionExecutionContext);
     } catch (ExecException e) {
       throw e.toActionExecutionException("Java compilation in rule '" + getOwner().getLabel() + "'",
@@ -729,11 +694,34 @@ public class JavaCompileAction extends AbstractAction {
   }
 
   /**
+   * Tells {@link Builder} how to create new artifacts. Is there so that {@link Builder} can be
+   * exercised in tests without creating a full {@link RuleContext}.
+   */
+  public interface ArtifactFactory {
+
+    /**
+     * Create an artifact with the specified root-relative path under the specified root.
+     */
+    Artifact create(PathFragment rootRelativePath, Root root);
+  }
+
+  @VisibleForTesting
+  public static ArtifactFactory createArtifactFactory(final AnalysisEnvironment env) {
+    return new ArtifactFactory() {
+      @Override
+      public Artifact create(PathFragment rootRelativePath, Root root) {
+        return env.getDerivedArtifact(rootRelativePath, root);
+      }
+    };
+  }
+
+  /**
    * Builder class to construct Java compile actions.
    */
   public static class Builder {
     private final ActionOwner owner;
     private final AnalysisEnvironment analysisEnvironment;
+    private final ArtifactFactory artifactFactory;
     private final BuildConfiguration configuration;
     private final JavaSemantics semantics;
 
@@ -764,7 +752,6 @@ public class JavaCompileAction extends AbstractAction {
     private Artifact javaBuilderJar;
     private Artifact langtoolsJar;
     private ImmutableList<Artifact> instrumentationJars = ImmutableList.of();
-    private PathFragment classDirectory;
     private PathFragment sourceGenDirectory;
     private PathFragment tempDirectory;
     private final List<Artifact> processorPath = new ArrayList<>();
@@ -776,9 +763,11 @@ public class JavaCompileAction extends AbstractAction {
      * Creates a Builder from an owner and a build configuration.
      */
     public Builder(ActionOwner owner, AnalysisEnvironment analysisEnvironment,
-        BuildConfiguration configuration, JavaSemantics semantics) {
+        ArtifactFactory artifactFactory, BuildConfiguration configuration,
+        JavaSemantics semantics) {
       this.owner = owner;
       this.analysisEnvironment = analysisEnvironment;
+      this.artifactFactory = artifactFactory;
       this.configuration = configuration;
       this.semantics = semantics;
     }
@@ -786,8 +775,15 @@ public class JavaCompileAction extends AbstractAction {
     /**
      * Creates a Builder from an owner and a build configuration.
      */
-    public Builder(RuleContext ruleContext, JavaSemantics semantics) {
-      this(ruleContext.getActionOwner(), ruleContext.getAnalysisEnvironment(),
+    public Builder(final RuleContext ruleContext, JavaSemantics semantics) {
+      this(ruleContext.getActionOwner(),
+          ruleContext.getAnalysisEnvironment(),
+          new ArtifactFactory() {
+            @Override
+            public Artifact create(PathFragment rootRelativePath, Root root) {
+              return ruleContext.getDerivedArtifact(rootRelativePath, root);
+            }
+          },
           ruleContext.getConfiguration(), semantics);
     }
 
@@ -823,7 +819,7 @@ public class JavaCompileAction extends AbstractAction {
       }
 
       if (paramFile == null) {
-        paramFile = analysisEnvironment.getDerivedArtifact(
+        paramFile = artifactFactory.create(
             ParameterFile.derivePath(outputJar.getRootRelativePath()),
             configuration.getBinDirectory());
       }
@@ -841,12 +837,14 @@ public class JavaCompileAction extends AbstractAction {
       Preconditions.checkState(javaExecutable.isAbsolute() ^ !javabaseInputs.isEmpty(),
           javaExecutable);
 
-      Collection<Artifact> outputs = Collections2.filter(Arrays.asList(
+      ArrayList<Artifact> outputs = new ArrayList<>(Collections2.filter(Arrays.asList(
           outputJar,
           metadata,
           gensrcOutputJar,
           manifestProtoOutput,
-          outputDepsProto), Predicates.notNull());
+          outputDepsProto), Predicates.notNull()));
+      PathFragment classDirectory =
+          configuration.getBinFragment().getRelative(workDir(outputJar, "_files"));
 
       CustomCommandLine.Builder paramFileContentsBuilder = javaCompileCommandLine(
           semantics,
@@ -912,8 +910,18 @@ public class JavaCompileAction extends AbstractAction {
           internedJcopts,
           directJars,
           strictJavaDeps,
-          compileTimeDependencyArtifacts,
-          semantics);
+          compileTimeDependencyArtifacts);
+    }
+
+    /**
+     * For an output jar and a suffix, produces a derived directory under
+     * {@code bin} directory with a given suffix.
+     */
+    private PathFragment workDir(Artifact outputJar, String suffix) {
+      PathFragment path = outputJar.getRootRelativePath();
+      String basename = FileSystemUtils.removeExtension(path.getBaseName()) + suffix;
+      path = path.replaceName(basename);
+      return path;
     }
 
     public Builder setParameterFile(Artifact paramFile) {
@@ -1035,11 +1043,6 @@ public class JavaCompileAction extends AbstractAction {
 
     public Builder setExtdirInputs(Iterable<Artifact> extdirEntries) {
       this.extdirInputs = ImmutableList.copyOf(extdirEntries);
-      return this;
-    }
-
-    public Builder setClassDirectory(PathFragment classDirectory) {
-      this.classDirectory = classDirectory;
       return this;
     }
 
