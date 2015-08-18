@@ -32,6 +32,7 @@ import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.ActionGraph;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactFactory;
+import com.google.devtools.build.lib.actions.ArtifactOwner;
 import com.google.devtools.build.lib.actions.PackageRootResolver;
 import com.google.devtools.build.lib.actions.Root;
 import com.google.devtools.build.lib.analysis.DependencyResolver.Dependency;
@@ -63,15 +64,18 @@ import com.google.devtools.build.lib.pkgcache.LoadingPhaseRunner.LoadingResult;
 import com.google.devtools.build.lib.pkgcache.PackageManager;
 import com.google.devtools.build.lib.rules.test.CoverageReportActionFactory;
 import com.google.devtools.build.lib.rules.test.CoverageReportActionFactory.CoverageReportActionsWrapper;
+import com.google.devtools.build.lib.skyframe.ActionLookupValue;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.CoverageReportValue;
 import com.google.devtools.build.lib.skyframe.SkyframeBuildView;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.Label;
+import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.util.RegexFilter;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.skyframe.SkyKey;
+import com.google.devtools.build.skyframe.WalkableGraph;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionsBase;
 
@@ -211,12 +215,6 @@ public class BuildView {
   @Nullable private final CoverageReportActionFactory coverageReportActionFactory;
 
   /**
-   * A union of package roots of all previous incremental analysis results. This is used to detect
-   * changes of package roots between incremental analysis instances.
-   */
-  private final Map<PackageIdentifier, Path> cumulativePackageRoots = new HashMap<>();
-
-  /**
    * Used only for testing that we clear Skyframe caches correctly.
    * TODO(bazel-team): Remove this once we get rid of legacy Skyframe synchronization.
    */
@@ -308,7 +306,6 @@ public class BuildView {
    */
   @VisibleForTesting
   public void clear() {
-    cumulativePackageRoots.clear();
     artifactFactory.clear();
   }
 
@@ -570,22 +567,8 @@ public class BuildView {
     }
     skyframeAnalysisWasDiscarded = false;
     ImmutableMap<PackageIdentifier, Path> packageRoots = loadingResult.getPackageRoots();
-
-    if (buildHasIncompatiblePackageRoots(packageRoots)) {
-      // When a package root changes source artifacts with the new root will be created, but we
-      // cannot be sure that there are no references remaining to the corresponding artifacts
-      // with the old root. To avoid that scenario, the analysis cache is simply dropped when
-      // a package root change is detected.
-      LOG.info("Discarding analysis cache: package roots have changed.");
-
-      skyframeExecutor.dropConfiguredTargets();
-      skyframeCacheWasInvalidated = true;
-      clear();
-    }
-    cumulativePackageRoots.putAll(packageRoots);
     this.configurations = configurations;
     setArtifactRoots(packageRoots);
-
     // Determine the configurations.
     List<TargetAndConfiguration> nodes = nodesForTargets(targets);
 
@@ -600,9 +583,12 @@ public class BuildView {
     prepareToBuild(new SkyframePackageRootResolver(skyframeExecutor));
     skyframeExecutor.injectWorkspaceStatusData();
     Collection<ConfiguredTarget> configuredTargets;
+    WalkableGraph graph;
     try {
-      configuredTargets = skyframeBuildView.configureTargets(
-          targetSpecs, eventBus, viewOptions.keepGoing);
+      Pair<Collection<ConfiguredTarget>, WalkableGraph> configuredTargetsResult =
+          skyframeBuildView.configureTargets(targetSpecs, eventBus, viewOptions.keepGoing);
+      configuredTargets = configuredTargetsResult.getFirst();
+      graph = configuredTargetsResult.getSecond();
     } finally {
       skyframeBuildView.clearInvalidatedConfiguredTargets();
     }
@@ -618,14 +604,15 @@ public class BuildView {
     }
 
     AnalysisResult result = createResult(loadingResult, topLevelOptions,
-        viewOptions, configuredTargets, analysisSuccessful);
+        viewOptions, configuredTargets, analysisSuccessful, graph);
     LOG.info("Finished analysis");
     return result;
   }
 
   private AnalysisResult createResult(LoadingResult loadingResult,
       TopLevelArtifactContext topLevelOptions, BuildView.Options viewOptions,
-      Collection<ConfiguredTarget> configuredTargets, boolean analysisSuccessful)
+      Collection<ConfiguredTarget> configuredTargets, boolean analysisSuccessful,
+      final WalkableGraph graph)
           throws InterruptedException {
     Collection<Target> testsToRun = loadingResult.getTestsToRun();
     Collection<ConfiguredTarget> allTargetsToTest = null;
@@ -666,7 +653,21 @@ public class BuildView {
             ? null
             : "execution phase succeeded, but not all targets were analyzed")
           : "execution phase succeeded, but there were loading phase errors";
-    return new AnalysisResult(configuredTargets, allTargetsToTest, error, getActionGraph(),
+
+    final ActionGraph actionGraph = new ActionGraph() {
+      @Nullable
+      @Override
+      public Action getGeneratingAction(Artifact artifact) {
+        ArtifactOwner artifactOwner = artifact.getArtifactOwner();
+        if (artifactOwner instanceof ActionLookupValue.ActionLookupKey) {
+          SkyKey key = ActionLookupValue.key((ActionLookupValue.ActionLookupKey) artifactOwner);
+          ActionLookupValue val = (ActionLookupValue) graph.getValue(key);
+          return val == null ? null : val.getGeneratingAction(artifact);
+        }
+        return null;
+      }
+    };
+    return new AnalysisResult(configuredTargets, allTargetsToTest, error, actionGraph,
         artifactsToBuild, parallelTests, exclusiveTests, topLevelOptions);
   }
 
@@ -753,23 +754,6 @@ public class BuildView {
       }
     }
     return ImmutableList.copyOf(nodes);
-  }
-
-  /**
-   * Detects when a package root changes between instances of incremental analysis.
-   *
-   * <p>This case is currently problematic for incremental analysis because when a package root
-   * changes, source artifacts with the new root will be created, but we can not be sure that there
-   * are no references remaining to the corresponding artifacts with the old root.
-   */
-  private boolean buildHasIncompatiblePackageRoots(Map<PackageIdentifier, Path> packageRoots) {
-    for (Map.Entry<PackageIdentifier, Path> entry : packageRoots.entrySet()) {
-      Path prevRoot = cumulativePackageRoots.get(entry.getKey());
-      if (prevRoot != null && !entry.getValue().equals(prevRoot)) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /**

@@ -31,6 +31,7 @@ import com.google.devtools.build.lib.syntax.SkylarkSignatureProcessor.HackHackEi
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -951,7 +952,7 @@ public class MethodLibrary {
   };
 
   @SkylarkSignature(name = "set", returnType = SkylarkNestedSet.class,
-      doc = "Creates a <a href=\"#modules.set\">set</a> from the <code>items</code>."
+      doc = "Creates a <a href=\"set.html\">set</a> from the <code>items</code>."
       + " The set supports nesting other sets of the same element"
       + " type in it. A desired iteration order can also be specified.<br>"
       + " Examples:<br><pre class=\"language-python\">set([\"a\", \"b\"])\n"
@@ -964,7 +965,7 @@ public class MethodLibrary {
             doc = "The ordering strategy for the set if it's nested, "
             + "possible values are: <code>stable</code> (default), <code>compile</code>, "
             + "<code>link</code> or <code>naive_link</code>. An explanation of the "
-            + "values can be found <a href=\"#modules.set\">here</a>.")},
+            + "values can be found <a href=\"set.html\">here</a>.")},
       useLocation = true)
   private static final BuiltinFunction set = new BuiltinFunction("set") {
     public SkylarkNestedSet invoke(Object items, String order,
@@ -976,10 +977,52 @@ public class MethodLibrary {
       }
     }
   };
+  
+  @SkylarkSignature(name = "dict", returnType = Map.class,
+      doc =
+      "Creates a <a href=\"#modules.dict\">dictionary</a> from an optional positional "
+      + "argument and an optional set of keyword arguments. Values from the keyword argument "
+      + "will overwrite values from the positional argument if a key appears multiple times. "
+      + "Dictionaries are always sorted by their keys",
+      optionalPositionals = {
+          @Param(name = "args", type = Iterable.class, defaultValue = "[]",
+              doc =
+              "List of entries. Entries must be tuples or lists with exactly "
+              + "two elements: key, value"),
+      },
+      extraKeywords = {@Param(name = "kwargs", doc = "Dictionary of additional entries.")},
+      useLocation = true)
+  private static final BuiltinFunction dict = new BuiltinFunction("dict") {
+    @SuppressWarnings("unused")
+    public Map<Object, Object> invoke(Iterable<Object> args, Map<Object, Object> kwargs,
+        Location loc) throws EvalException, ConversionException {
+      try {
+        Map<Object, Object> result = new HashMap<>();
+        List<Object> list = Type.OBJECT_LIST.convert(args, "dict(args)");
+
+        for (Object tuple : list) {
+          List<Object> mapping = Type.OBJECT_LIST.convert(tuple, "dict(args)");
+          int numElements = mapping.size();
+
+          if (numElements != 2) {
+            throw new EvalException(
+                location,
+                String.format(
+                    "Tuple has length %d, but exactly two elements are required", numElements));
+          }
+          result.put(mapping.get(0), mapping.get(1));
+        }
+        result.putAll(kwargs);
+        return result;
+      } catch (IllegalArgumentException | ClassCastException | NullPointerException ex) {
+        throw new EvalException(loc, ex);
+      }
+    }
+  };
 
   @SkylarkSignature(name = "union", objectType = SkylarkNestedSet.class,
       returnType = SkylarkNestedSet.class,
-      doc = "Creates a new <a href=\"#modules.set\">set</a> that contains both "
+      doc = "Creates a new <a href=\"set.html\">set</a> that contains both "
           + "the input set as well as all additional elements.",
       mandatoryPositionals = {
         @Param(name = "input", type = SkylarkNestedSet.class, doc = "The input set"),
@@ -1323,12 +1366,12 @@ public class MethodLibrary {
       items, get, keys, values);
 
   private static final List<BaseFunction> pureGlobalFunctions = ImmutableList.<BaseFunction>of(
-      bool, enumerate, int_, len, minus, range, repr, select, sorted, str);
+      bool, dict, enumerate, int_, len, list, minus, range, repr, select, sorted, str, zip);
 
   private static final List<BaseFunction> skylarkGlobalFunctions =
       ImmutableList.<BaseFunction>builder()
       .addAll(pureGlobalFunctions)
-      .add(list, struct, hasattr, getattr, set, dir, type, fail, print, zip)
+      .add(dir, fail, getattr, hasattr, print, set, struct, type)
       .build();
 
   /**
@@ -1342,12 +1385,14 @@ public class MethodLibrary {
     setupMethodEnvironment(env, List.class, listPureFunctions);
     setupMethodEnvironment(env, SkylarkList.class, listPureFunctions);
     setupMethodEnvironment(env, SkylarkNestedSet.class, setFunctions);
+    // TODO(bazel-team): Simplify when list types are unified.
+    env.registerFunction(SkylarkList.class, indexOperator.getName(), indexOperator);
+    env.registerFunction(List.class, indexOperator.getName(), indexOperator);
+    env.registerFunction(ImmutableList.class, indexOperator.getName(), indexOperator);
+
     if (env.isSkylarkEnabled()) {
-      env.registerFunction(SkylarkList.class, indexOperator.getName(), indexOperator);
       setupMethodEnvironment(env, skylarkGlobalFunctions);
     } else {
-      env.registerFunction(List.class, indexOperator.getName(), indexOperator);
-      env.registerFunction(ImmutableList.class, indexOperator.getName(), indexOperator);
       // TODO(bazel-team): listFunctions are not allowed in Skylark extensions (use += instead).
       // It is allowed in BUILD files only for backward-compatibility.
       setupMethodEnvironment(env, List.class, listFunctions);

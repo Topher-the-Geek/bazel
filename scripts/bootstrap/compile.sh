@@ -23,9 +23,11 @@ DIRS=$(echo src/{java_tools/singlejar/java/com/google/devtools/build/zip,main/ja
 case "${PLATFORM}" in
 msys*|mingw*)
   BLAZE_UTIL_SUFFIX=mingw
+  BLAZE_UTIL_POSIX=""
   ;;
 *)
   BLAZE_UTIL_SUFFIX="${PLATFORM}"
+  BLAZE_UTIL_POSIX="src/main/cpp/blaze_util_posix.cc"
   ;;
 esac
 
@@ -34,6 +36,7 @@ src/main/cpp/blaze_startup_options.cc
 src/main/cpp/blaze_startup_options_common.cc
 src/main/cpp/blaze_util.cc
 src/main/cpp/blaze_util_${BLAZE_UTIL_SUFFIX}.cc
+${BLAZE_UTIL_POSIX}
 src/main/cpp/blaze.cc
 src/main/cpp/option_processor.cc
 src/main/cpp/util/errors.cc
@@ -90,7 +93,11 @@ linux)
   if [ "${MACHINE_IS_64BIT}" = 'yes' ]; then
     PROTOC=${PROTOC:-third_party/protobuf/protoc-linux-x86_64.exe}
   else
-    PROTOC=${PROTOC:-third_party/protobuf/protoc-linux-x86_32.exe}
+    if [ "${MACHINE_IS_ARM}" = 'yes' ]; then
+      PROTOC=${PROTOC:-third_party/protobuf/protoc-linux-arm32.exe}
+    else
+      PROTOC=${PROTOC:-third_party/protobuf/protoc-linux-x86_32.exe}
+    fi
   fi
   ;;
 

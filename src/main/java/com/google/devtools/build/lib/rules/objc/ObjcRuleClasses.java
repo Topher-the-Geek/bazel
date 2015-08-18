@@ -186,8 +186,10 @@ public class ObjcRuleClasses {
   static RuleConfiguredTargetBuilder ruleConfiguredTarget(RuleContext ruleContext,
       NestedSet<Artifact> filesToBuild) {
     RunfilesProvider runfilesProvider = RunfilesProvider.withData(
-        new Runfiles.Builder().addRunfiles(ruleContext, RunfilesProvider.DEFAULT_RUNFILES).build(),
-        new Runfiles.Builder().addTransitiveArtifacts(filesToBuild).build());
+        new Runfiles.Builder(ruleContext.getWorkspaceName())
+            .addRunfiles(ruleContext, RunfilesProvider.DEFAULT_RUNFILES).build(),
+        new Runfiles.Builder(ruleContext.getWorkspaceName())
+            .addTransitiveArtifacts(filesToBuild).build());
 
     return new RuleConfiguredTargetBuilder(ruleContext)
         .setFilesToBuild(filesToBuild)
@@ -326,6 +328,9 @@ public class ObjcRuleClasses {
   static final FileTypeSet STORYBOARD_TYPE = FileTypeSet.of(FileType.of(".storyboard"));
 
   static final FileType XIB_TYPE = FileType.of(".xib");
+
+  // TODO(bazel-team): Restrict this to actual header files only.
+  static final FileTypeSet HDRS_TYPE = FileTypeSet.ANY_FILE;
 
   /**
    * Common attributes for {@code objc_*} rules that allow the definition of resources such as
@@ -513,7 +518,14 @@ public class ObjcRuleClasses {
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(attr("hdrs", LABEL_LIST)
               .direct_compile_time_input()
-              .allowedFileTypes(FileTypeSet.ANY_FILE))
+              .allowedFileTypes(HDRS_TYPE))
+          /* <!-- #BLAZE_RULE($objc_compile_dependency_rule).ATTRIBUTE(bridging_header) -->
+          A header defining the Objective-C interfaces to be exposed in Swift.
+          ${SYNOPSIS}
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(attr("bridging_header", Type.LABEL)
+              .direct_compile_time_input()
+              .allowedFileTypes(HDRS_TYPE))
           /* <!-- #BLAZE_RULE($objc_compile_dependency_rule).ATTRIBUTE(includes) -->
           List of <code>#include/#import</code> search paths to add to this target
           and all depending targets.
@@ -558,7 +570,8 @@ public class ObjcRuleClasses {
         "objc_framework",
         "objc_proto_library",
         "j2objc_library",
-        "cc_library");
+        "cc_library",
+        "ios_framework");
 
     @Override
     public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {

@@ -31,6 +31,7 @@ public class ObjcXcodeprojRule implements RuleDefinition {
   @Override
   public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
     return builder
+        .requiresConfigurationFragments(ObjcConfiguration.class)
         /*<!-- #BLAZE_RULE(objc_xcodeproj).IMPLICIT_OUTPUTS -->
         <ul>
         <li><code><var>name</var>.xcodeproj/project.pbxproj</code>: A combined Xcode project file
@@ -49,7 +50,9 @@ public class ObjcXcodeprojRule implements RuleDefinition {
                 "ios_application",
                 "ios_extension_binary",
                 "ios_extension",
-                "ios_test",                
+                "ios_framework",
+                "ios_framework_binary",
+                "ios_test",
                 "objc_bundle_library",
                 "objc_import",
                 "objc_library")

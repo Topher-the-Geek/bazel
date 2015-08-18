@@ -126,6 +126,14 @@ public class CppRuleClasses {
   public static final String GENERATE_SUBMODULES = "generate_submodules";
 
   /**
+   * A string constant for the transitive_module_maps feature.
+   *
+   * <p>This feature is used temporarily to switch between adding transitive module maps to a
+   * modules enabled build or only adding module maps from direct dependencies.
+   */
+  public static final String TRANSITIVE_MODULE_MAPS = "transitive_module_maps";
+
+  /**
    * A string constant for switching on that a header module file includes information about
    * all its dependencies, so we do not need to pass all transitive dependent header modules on
    * the command line.
@@ -147,6 +155,11 @@ public class CppRuleClasses {
   public static final String INCLUDE_PATHS = "include_paths";
 
   /**
+   * A string constant for the ThinLTO feature.
+   */
+  public static final String THIN_LTO = "thin_lto";
+
+  /*
    * A string constant for the fdo_instrument feature.
    */
   public static final String FDO_INSTRUMENT = "fdo_instrument";
@@ -165,4 +178,9 @@ public class CppRuleClasses {
    * A string constant for the lipo feature.
    */
   public static final String LIPO = "lipo";
+
+  /**
+   * A string constant for the coverage feature.
+   */
+  public static final String COVERAGE = "coverage";
 }

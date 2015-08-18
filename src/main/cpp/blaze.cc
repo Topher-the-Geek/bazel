@@ -140,12 +140,17 @@ struct GlobalVariables {
 
   // Absolute path of the blaze binary
   string binary_path;
+
+  // MD5 hash of the Blaze binary (includes deploy.jar, extracted binaries, and
+  // anything else that ends up under the install_base).
+  string install_md5;
 };
 
 static GlobalVariables *globals;
 
 static void InitGlobals() {
   globals = new GlobalVariables;
+  globals->server_pid = -1;
   globals->sigint_count = 0;
   globals->startup_time = 0;
   globals->extract_data_time = 0;
@@ -198,8 +203,7 @@ class GetInstallKeyFileProcessor : public devtools_ijar::ZipExtractorProcessor {
 // 'install_base_key' contained as a ZIP entry in the Blaze binary); as a side
 // effect, it also populates the extracted_binaries global variable.
 static string GetInstallBase(const string &root, const string &self_path) {
-  string install_base_key;
-  GetInstallKeyFileProcessor processor(&install_base_key);
+  GetInstallKeyFileProcessor processor(&globals->install_md5);
   std::unique_ptr<devtools_ijar::ZipExtractor> extractor(
       devtools_ijar::ZipExtractor::Create(self_path.c_str(), &processor));
   if (extractor.get() == NULL) {
@@ -212,11 +216,11 @@ static string GetInstallBase(const string &root, const string &self_path) {
         "\nFailed to extract install_base_key: %s", extractor->GetError());
   }
 
-  if (install_base_key.empty()) {
+  if (globals->install_md5.empty()) {
     die(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
         "\nFailed to find install_base_key's in zip file");
   }
-  return root + "/" + install_base_key;
+  return root + "/" + globals->install_md5;
 }
 
 // Escapes colons by replacing them with '_C' and underscores by replacing them
@@ -276,11 +280,11 @@ static vector<string> GetArgumentArray() {
   for (const auto& it : globals->extracted_binaries) {
     if (IsSharedLibrary(it)) {
       if (!first) {
-        java_library_path += ":";
+        java_library_path += blaze::ListSeparator();
       }
       first = false;
-      java_library_path += blaze_util::JoinPath(real_install_dir,
-                                                blaze_util::Dirname(it));
+      java_library_path += blaze::ConvertPath(
+          blaze_util::JoinPath(real_install_dir, blaze_util::Dirname(it)));
     }
   }
   result.push_back(java_library_path);
@@ -299,8 +303,8 @@ static vector<string> GetArgumentArray() {
   result.insert(result.end(), user_options.begin(), user_options.end());
 
   result.push_back("-jar");
-  result.push_back(blaze_util::JoinPath(real_install_dir,
-                                        globals->extracted_binaries[0]));
+  result.push_back(blaze::ConvertPath(
+      blaze_util::JoinPath(real_install_dir, globals->extracted_binaries[0])));
 
   if (!globals->options.batch) {
     result.push_back("--max_idle_secs");
@@ -310,9 +314,13 @@ static vector<string> GetArgumentArray() {
     // the code expects it to be at args[0] if it's been set.
     result.push_back("--batch");
   }
-  result.push_back("--install_base=" + globals->options.install_base);
-  result.push_back("--output_base=" + globals->options.output_base);
-  result.push_back("--workspace_directory=" + globals->workspace);
+  result.push_back("--install_base=" +
+                   blaze::ConvertPath(globals->options.install_base));
+  result.push_back("--install_md5=" + globals->install_md5);
+  result.push_back("--output_base=" +
+                   blaze::ConvertPath(globals->options.output_base));
+  result.push_back("--workspace_directory=" +
+                   blaze::ConvertPath(globals->workspace));
   if (!globals->options.skyframe.empty()) {
     result.push_back("--skyframe=" + globals->options.skyframe);
   }
@@ -613,6 +621,24 @@ static void WriteFileToStreamOrDie(FILE *stream, const char *file_name) {
   fclose(fp);
 }
 
+// After connecting to the Blaze server, initialize server_pid.
+static void GetServerPid(int s, const string &pid_file) {
+  globals->server_pid = GetPeerProcessId(s);
+  if (globals->server_pid == -1) {
+    // Note: there is no race here on startup since the server creates
+    // the pid file strictly before it binds the socket.
+    char buf[16];
+    auto len = readlink(pid_file.c_str(), buf, sizeof(buf) - 1);
+    if (len > 0) {
+      buf[len] = '\0';
+      globals->server_pid = atoi(buf);
+    } else {
+      pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
+           "can't get server pid from connection");
+    }
+  }
+}
+
 // Connects to the Blaze server, returning the socket, or -1 if no
 // server is running and !start.  If start, attempts to start a new
 // server, and exits on failure.
@@ -633,8 +659,11 @@ static int ConnectToServer(bool start) {
   }
 
   string socket_file = server_dir + "/server.socket";
+  string pid_file = server_dir + "/server.pid";
 
+  globals->server_pid = 0;
   if (Connect(s, socket_file) == 0) {
+    GetServerPid(s, pid_file);
     return s;
   }
   if (start) {
@@ -654,6 +683,7 @@ static int ConnectToServer(bool start) {
           fputc('\n', stderr);
           fflush(stderr);
         }
+        GetServerPid(s, pid_file);
         return s;
       }
       fputc('.', stderr);
@@ -678,6 +708,7 @@ static int ConnectToServer(bool start) {
 
 // Kills the specified running Blaze server.
 static void KillRunningServer(pid_t server_pid) {
+  if (server_pid == -1) return;
   fprintf(stderr, "Sending SIGTERM to previous %s server (pid=%d)... ",
           globals->options.GetProductName().c_str(), server_pid);
   fflush(stderr);
@@ -708,7 +739,7 @@ static void KillRunningServer(pid_t server_pid) {
 static bool KillRunningServerIfAny() {
   int socket = ConnectToServer(false);
   if (socket != -1) {
-    KillRunningServer(GetPeerProcessId(socket));
+    KillRunningServer(globals->server_pid);
     return true;
   }
   return false;
@@ -986,7 +1017,6 @@ static void KillRunningServerIfDifferentStartupOptions() {
     return;
   }
 
-  pid_t server_pid = GetPeerProcessId(socket);
   close(socket);
   string cmdline_path = globals->options.output_base + "/server/cmdline";
   string joined_arguments;
@@ -1007,7 +1037,7 @@ static void KillRunningServerIfDifferentStartupOptions() {
             "WARNING: Running %s server needs to be killed, because the "
             "startup options are different.\n",
             globals->options.GetProductName().c_str());
-    KillRunningServer(server_pid);
+    KillRunningServer(globals->server_pid);
   }
 }
 
@@ -1154,7 +1184,6 @@ static void SendServerRequest(void) {
   int socket = -1;
   while (true) {
     socket = ConnectToServer(true);
-    globals->server_pid = GetPeerProcessId(socket);
 
     // Check for deleted server cwd:
     string server_cwd = GetProcessCWD(globals->server_pid);
@@ -1345,7 +1374,8 @@ static void ComputeBaseDirectories(const string &self_path) {
     globals->options.install_base =
         GetInstallBase(install_user_root, self_path);
   } else {
-    // We call GetInstallBase anyway to populate extracted_binaries.
+    // We call GetInstallBase anyway to populate extracted_binaries and
+    // install_md5.
     GetInstallBase("", self_path);
   }
 

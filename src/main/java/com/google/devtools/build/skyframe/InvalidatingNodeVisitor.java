@@ -22,13 +22,12 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.concurrent.AbstractQueueVisitor;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.util.Pair;
 
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Logger;
 
 import javax.annotation.Nullable;
 
@@ -66,18 +65,25 @@ public abstract class InvalidatingNodeVisitor extends AbstractQueueVisitor {
   // Aliased to InvalidationState.pendingVisitations.
   protected final Set<Pair<SkyKey, InvalidationType>> pendingVisitations;
 
-  private static final Logger LOG = Logger.getLogger(InvalidatingNodeVisitor.class.getName());
-
   protected InvalidatingNodeVisitor(
       DirtiableGraph graph, @Nullable EvaluationProgressReceiver invalidationReceiver,
       InvalidationState state, DirtyKeyTracker dirtyKeyTracker) {
-    super(/*concurrent*/true,
-        /*corePoolSize*/DEFAULT_THREAD_COUNT,
-        /*maxPoolSize*/DEFAULT_THREAD_COUNT,
-        1, TimeUnit.SECONDS,
-        /*failFastOnException*/true,
-        /*failFastOnInterrupt*/true,
-        "skyframe-invalidator");
+    this(graph, invalidationReceiver, state, dirtyKeyTracker, EXECUTOR_FACTORY);
+  }
+
+  protected InvalidatingNodeVisitor(
+      DirtiableGraph graph, @Nullable EvaluationProgressReceiver invalidationReceiver,
+      InvalidationState state, DirtyKeyTracker dirtyKeyTracker,
+      Function<ThreadPoolExecutorParams, ThreadPoolExecutor> executorFactory) {
+    super(/*concurrent=*/true,
+        /*corePoolSize=*/DEFAULT_THREAD_COUNT,
+        /*maxPoolSize=*/DEFAULT_THREAD_COUNT,
+        /*keepAliveTime=*/1,
+        /*units=*/TimeUnit.SECONDS,
+        /*failFastOnException=*/true,
+        /*failFastOnInterrupt=*/true,
+        "skyframe-invalidator",
+        executorFactory);
     this.graph = Preconditions.checkNotNull(graph);
     this.invalidationReceiver = invalidationReceiver;
     this.dirtyKeyTracker = Preconditions.checkNotNull(dirtyKeyTracker);
@@ -88,7 +94,6 @@ public abstract class InvalidatingNodeVisitor extends AbstractQueueVisitor {
    * Initiates visitation and waits for completion.
    */
   void run() throws InterruptedException {
-    long startTime = Profiler.nanoTimeMaybe();
     // Make a copy to avoid concurrent modification confusing us as to which nodes were passed by
     // the caller, and which are added by other threads during the run. Since no tasks have been
     // started yet (the queueDirtying calls start them), this is thread-safe.
@@ -99,22 +104,16 @@ public abstract class InvalidatingNodeVisitor extends AbstractQueueVisitor {
       visit(visitData.first, visitData.second, !MUST_EXIST);
     }
     work(/*failFastOnInterrupt=*/true);
-
-    long duration = Profiler.nanoTimeMaybe() - startTime;
-    if (duration > 0) {
-      LOG.info("Spent " + TimeUnit.NANOSECONDS.toMillis(duration) + " ms invalidating "
-                   + count() + " nodes");
-    }
     Preconditions.checkState(pendingVisitations.isEmpty(),
         "All dirty nodes should have been processed: %s", pendingVisitations);
   }
 
   protected abstract long count();
 
-  protected void informInvalidationReceiver(SkyValue value,
+  protected void informInvalidationReceiver(SkyKey key,
       EvaluationProgressReceiver.InvalidationState state) {
-    if (invalidationReceiver != null && value != null) {
-      invalidationReceiver.invalidated(value, state);
+    if (invalidationReceiver != null) {
+      invalidationReceiver.invalidated(key, state);
     }
   }
 
@@ -245,9 +244,8 @@ public abstract class InvalidatingNodeVisitor extends AbstractQueueVisitor {
                 }
               }
             }
-            // Allow custom Value-specific logic to update dirtiness status.
-            informInvalidationReceiver(entry.getValue(),
-                EvaluationProgressReceiver.InvalidationState.DELETED);
+            // Allow custom key-specific logic to update dirtiness status.
+            informInvalidationReceiver(key, EvaluationProgressReceiver.InvalidationState.DELETED);
           }
           if (traverseGraph) {
             // Force reverseDeps consolidation (validates that attempts to remove reverse deps were
@@ -274,8 +272,9 @@ public abstract class InvalidatingNodeVisitor extends AbstractQueueVisitor {
 
     protected DirtyingNodeVisitor(DirtiableGraph graph,
         EvaluationProgressReceiver invalidationReceiver, InvalidationState state,
-        DirtyKeyTracker dirtyKeyTracker) {
-      super(graph, invalidationReceiver, state, dirtyKeyTracker);
+        DirtyKeyTracker dirtyKeyTracker,
+        Function<ThreadPoolExecutorParams, ThreadPoolExecutor> executorFactory) {
+      super(graph, invalidationReceiver, state, dirtyKeyTracker, executorFactory);
     }
 
     @Override
@@ -341,11 +340,10 @@ public abstract class InvalidatingNodeVisitor extends AbstractQueueVisitor {
           }
 
           // This entry remains in the graph in this dirty state until it is re-evaluated.
-          Pair<? extends Iterable<SkyKey>, ? extends SkyValue> depsAndValue =
-              entry.markDirty(isChanged);
+          Iterable<SkyKey> deps = entry.markDirty(isChanged);
           // It is not safe to interrupt the logic from this point until the end of the method.
           // Any exception thrown should be unrecoverable.
-          if (depsAndValue == null) {
+          if (deps == null) {
             // Another thread has already dirtied this node. Don't do anything in this thread.
             pendingVisitations.remove(invalidationPair);
             return;
@@ -358,19 +356,18 @@ public abstract class InvalidatingNodeVisitor extends AbstractQueueVisitor {
 
           // Remove this node as a reverse dep from its children, since we have reset it and it no
           // longer lists its children as direct deps.
-          Map<SkyKey, NodeEntry> children = graph.getBatch(depsAndValue.first);
-          if (children.size() != Iterables.size(depsAndValue.first)) {
-            Set<SkyKey> deps = ImmutableSet.copyOf(depsAndValue.first);
+          Map<SkyKey, NodeEntry> children = graph.getBatch(deps);
+          if (children.size() != Iterables.size(deps)) {
+            Set<SkyKey> depsSet = ImmutableSet.copyOf(deps);
             throw new IllegalStateException("Mismatch in getBatch: " + key + ", " + entry + "\n"
-                + Sets.difference(deps, children.keySet()) + "\n"
-                + Sets.difference(children.keySet(), deps));
+                + Sets.difference(depsSet, children.keySet()) + "\n"
+                + Sets.difference(children.keySet(), depsSet));
           }
           for (NodeEntry child : children.values()) {
             child.removeReverseDep(key);
           }
 
-          SkyValue value = ValueWithMetadata.justValue(depsAndValue.second);
-          informInvalidationReceiver(value, EvaluationProgressReceiver.InvalidationState.DIRTY);
+          informInvalidationReceiver(key, EvaluationProgressReceiver.InvalidationState.DIRTY);
           dirtyKeyTracker.dirty(key);
           // Remove the node from the set as the last operation.
           pendingVisitations.remove(invalidationPair);

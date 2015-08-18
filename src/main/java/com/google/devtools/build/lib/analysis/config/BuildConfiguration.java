@@ -45,11 +45,11 @@ import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.rules.test.TestActionBuilder;
-import com.google.devtools.build.lib.syntax.ClassObject;
 import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.syntax.Label.SyntaxException;
 import com.google.devtools.build.lib.syntax.SkylarkCallable;
 import com.google.devtools.build.lib.syntax.SkylarkModule;
+import com.google.devtools.build.lib.syntax.SkylarkModuleNameResolver;
 import com.google.devtools.build.lib.util.CPU;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.OS;
@@ -108,7 +108,7 @@ import javax.annotation.Nullable;
 @SkylarkModule(name = "configuration",
     doc = "Data required for the analysis of a target that comes from targets that "
         + "depend on it and not targets that it depends on.")
-public final class BuildConfiguration implements ClassObject {
+public final class BuildConfiguration {
 
   /**
    * An interface for language-specific configurations.
@@ -193,22 +193,6 @@ public final class BuildConfiguration implements ClassObject {
      */
     public ImmutableList<Label> getCoverageReportGeneratorLabels() {
       return ImmutableList.of();
-    }
-
-    /**
-     * Determines whether this fragment can be accessed in Skylark as a field of
-     * ctx.configuration
-     */
-    public boolean isSkylarkVisible() {
-      return false;
-    }
-
-    /**
-     * If this fragment is skylarkVisible, it will be accessible in Skylark via
-     * ctx.configuration.NAME where NAME = getName()
-     */
-    public String getName() {
-      return getClass().getName();
     }
 
     /**
@@ -421,6 +405,8 @@ public final class BuildConfiguration implements ClassObject {
                 return "piii";
               case X86_64:
                 return "k8";
+              case ARM:
+                return "arm";
             }
         }
         return "unknown";
@@ -694,18 +680,33 @@ public final class BuildConfiguration implements ClassObject {
             + "subdirectory which has not been traversed.")
     public boolean checkFilesetDependenciesRecursively;
 
-    @Option(name = "run_under",
-        category = "run",
-        defaultValue = "null",
-        converter = RunUnderConverter.class,
-        help = "Prefix to insert in front of command before running. "
-            + "Examples:\n"
-            + "\t--run_under=valgrind\n"
-            + "\t--run_under=strace\n"
-            + "\t--run_under='strace -c'\n"
-            + "\t--run_under='valgrind --quiet --num-callers=20'\n"
-            + "\t--run_under=//package:target\n"
-            + "\t--run_under='//package:target --options'\n")
+    @Option(
+      name = "experimental_skyframe_native_filesets",
+      defaultValue = "false",
+      category = "experimental",
+      help =
+          "If true, Blaze will use the skyframe-native implementation of the Fileset rule."
+              + " This offers improved performance in incremental builds of Filesets as well as"
+              + " correct incremental behavior, but is not yet stable. The default is false,"
+              + " meaning Blaze uses the legacy impelementation of Fileset."
+    )
+    public boolean skyframeNativeFileset;
+
+    @Option(
+      name = "run_under",
+      category = "run",
+      defaultValue = "null",
+      converter = RunUnderConverter.class,
+      help =
+          "Prefix to insert in front of command before running. "
+              + "Examples:\n"
+              + "\t--run_under=valgrind\n"
+              + "\t--run_under=strace\n"
+              + "\t--run_under='strace -c'\n"
+              + "\t--run_under='valgrind --quiet --num-callers=20'\n"
+              + "\t--run_under=//package:target\n"
+              + "\t--run_under='//package:target --options'\n"
+    )
     public RunUnder runUnder;
 
     @Option(name = "distinct_host_configuration",
@@ -830,6 +831,9 @@ public final class BuildConfiguration implements ClassObject {
       // === Licenses ===
       host.checkLicenses = checkLicenses;
 
+      // === Fileset ===
+      host.skyframeNativeFileset = skyframeNativeFileset;
+
       // === Allow runtime_deps to depend on neverlink Java libraries.
       host.allowRuntimeDepsOnNeverLink = allowRuntimeDepsOnNeverLink;
 
@@ -892,7 +896,7 @@ public final class BuildConfiguration implements ClassObject {
   private Set<BuildConfiguration> allReachableConfigurations;
 
   private final ImmutableMap<Class<? extends Fragment>, Fragment> fragments;
-  private final ImmutableMap<String, Fragment> skylarkVisibleFragments;
+  private final ImmutableMap<String, Class<? extends Fragment>> skylarkVisibleFragments;
 
   /**
    * Directories in the output tree.
@@ -1118,15 +1122,16 @@ public final class BuildConfiguration implements ClassObject {
     checksum = Fingerprint.md5Digest(buildOptions.computeCacheKey());
   }
 
-  private ImmutableMap<String, Fragment> buildIndexOfVisibleFragments() {
-    ImmutableMap.Builder<String, Fragment> builder = ImmutableMap.builder();
+  private ImmutableMap<String, Class<? extends Fragment>> buildIndexOfVisibleFragments() {
+    ImmutableMap.Builder<String, Class<? extends Fragment>> builder = ImmutableMap.builder();
+    SkylarkModuleNameResolver resolver = new SkylarkModuleNameResolver();
 
-    for (Fragment fragment : fragments.values()) {
-      if (fragment.isSkylarkVisible()) {
-        builder.put(fragment.getName(), fragment);
+    for (Class<? extends Fragment> fragmentClass : fragments.keySet()) {
+      String name = resolver.resolveName(fragmentClass);
+      if (name != null) {
+        builder.put(name, fragmentClass);
       }
     }
-
     return builder.build();
   }
 
@@ -1696,6 +1701,10 @@ public final class BuildConfiguration implements ClassObject {
     return options.checkFilesetDependenciesRecursively;
   }
 
+  public boolean getSkyframeNativeFileset() {
+    return options.skyframeNativeFileset;
+  }
+
   public List<String> getTestArguments() {
     return options.testArguments;
   }
@@ -1923,20 +1932,11 @@ public final class BuildConfiguration implements ClassObject {
     return options.targetEnvironments;
   }
 
-  @Override
-  @Nullable
-  public Object getValue(String name) {
+  public Class<? extends Fragment> getSkylarkFragmentByName(String name) {
     return skylarkVisibleFragments.get(name);
   }
 
-  @Override
-  public ImmutableCollection<String> getKeys() {
+  public ImmutableCollection<String> getSkylarkFragmentNames() {
     return skylarkVisibleFragments.keySet();
-  }
-
-  @Override
-  @Nullable
-  public String errorMessage(String name) {
-    return String.format("There is no configuration fragment named '%s'", name);
   }
 }

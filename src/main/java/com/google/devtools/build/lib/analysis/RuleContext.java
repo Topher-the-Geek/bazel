@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.analysis;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
+import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.ImmutableMap;
@@ -259,10 +260,23 @@ public final class RuleContext extends TargetContext
   public <T extends Fragment> T getFragment(Class<T> fragment) {
     // TODO(bazel-team): The fragments can also be accessed directly through BuildConfiguration.
     // Can we lock that down somehow?
-    Preconditions.checkArgument(
-        rule.getRuleClassObject().isLegalConfigurationFragment(fragment),
+    Preconditions.checkArgument(isLegalFragment(fragment),
         "%s does not have access to %s", rule.getRuleClass(), fragment);
     return getConfiguration().getFragment(fragment);
+  }
+
+  @Nullable
+  public Fragment getSkylarkFragment(String name) {
+    Class<? extends Fragment> fragmentClass = getConfiguration().getSkylarkFragmentByName(name);
+    return (fragmentClass == null) ? null : getFragment(fragmentClass);
+  }
+
+  public ImmutableCollection<String> getSkylarkFragmentNames() {
+    return getConfiguration().getSkylarkFragmentNames();
+  }
+
+  public <T extends Fragment> boolean isLegalFragment(Class<T> fragment) {
+    return rule.getRuleClassObject().isLegalConfigurationFragment(fragment);
   }
 
   @Override

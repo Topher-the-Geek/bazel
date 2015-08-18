@@ -97,7 +97,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
       Iterable<Artifact> fakeLinkerInputs,
       boolean fake,
       ImmutableList<Pair<Artifact, Label>> cAndCppSources) {
-    Runfiles.Builder builder = new Runfiles.Builder();
+    Runfiles.Builder builder = new Runfiles.Builder(context.getWorkspaceName());
     Function<TransitiveInfoCollection, Runfiles> runfilesMapping =
         CppRunfilesProvider.runfilesFunction(linkStaticness != LinkStaticness.DYNAMIC);
     boolean linkshared = isLinkShared(context);
@@ -223,8 +223,21 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
           ruleContext.getConfiguration().getBinDirectory()));
     }
 
-    // store immutable context now, recreate builder later
+    // Store immutable context for use in other *_binary rules that are implemented by
+    // linking the interpreter (Java, Python, etc.) together with native deps.
     CppLinkAction.Context linkContext = new CppLinkAction.Context(linkActionBuilder);
+
+    if (featureConfiguration.isEnabled(CppRuleClasses.THIN_LTO)) {
+      linkActionBuilder.setLTOIndexing(true);
+      CppLinkAction indexAction = linkActionBuilder.build();
+      ruleContext.registerAction(indexAction);
+
+      for (LTOBackendArtifacts ltoArtifacts : indexAction.getAllLTOBackendArtifacts()) {
+        ltoArtifacts.scheduleLTOBackendAction(ruleContext);
+      }
+
+      linkActionBuilder.setLTOIndexing(false);
+    }
 
     CppLinkAction linkAction = linkActionBuilder.build();
     ruleContext.registerAction(linkAction);
@@ -359,7 +372,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
         .addNonLibraryInputs(compilationPrerequisites);
 
     // Determine the object files to link in.
-    boolean usePic = CppHelper.usePic(context, !isLinkShared(context)) && !fake;
+    boolean usePic = CppHelper.usePic(context, !isLinkShared(context));
     Iterable<Artifact> compiledObjectFiles = compilationOutputs.getObjectFiles(usePic);
 
     if (fake) {

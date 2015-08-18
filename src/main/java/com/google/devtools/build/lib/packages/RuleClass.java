@@ -35,6 +35,7 @@ import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 import com.google.devtools.build.lib.syntax.Argument;
 import com.google.devtools.build.lib.syntax.BaseFunction;
 import com.google.devtools.build.lib.syntax.Environment;
+import com.google.devtools.build.lib.syntax.FragmentClassNameResolver;
 import com.google.devtools.build.lib.syntax.FuncallExpression;
 import com.google.devtools.build.lib.syntax.GlobList;
 import com.google.devtools.build.lib.syntax.Label;
@@ -181,6 +182,33 @@ public final class RuleClass {
           return configuration;
         }
   };
+
+  /**
+   * How to handle the case if the configuration is missing fragments that are required according
+   * to the rule class.
+   */
+  public enum MissingFragmentPolicy {
+    /**
+     * Some rules are monolithic across languages, and we want them to continue to work even when
+     * individual languages are disabled. Use this policy if the rule implementation is handling
+     * missing fragments.
+     */
+    IGNORE,
+
+    /**
+     * Use this policy to generate fail actions for the target rather than failing the analysis
+     * outright. Again, this is used when rules are monolithic across languages, but we still need
+     * to analyze the dependent libraries. (Instead of this mechanism, consider annotating
+     * attributes as unused if certain fragments are unavailable.)
+     */
+    CREATE_FAIL_ACTIONS,
+
+    /**
+     * Use this policy to fail the analysis of that target with an error message; this is the
+     * default.
+     */
+    FAIL_ANALYSIS;
+  }
 
   /**
    * For Bazel's constraint system: the attribute that declares the set of environments a rule
@@ -461,7 +489,10 @@ public final class RuleClass {
         NO_EXTERNAL_BINDINGS;
     private SkylarkEnvironment ruleDefinitionEnvironment = null;
     private Set<Class<?>> configurationFragments = new LinkedHashSet<>();
-    private boolean failIfMissingConfigurationFragment;
+    private MissingFragmentPolicy missingFragmentPolicy = MissingFragmentPolicy.FAIL_ANALYSIS;
+    private Set<String> requiredFragmentNames = new LinkedHashSet<>();
+    private FragmentClassNameResolver fragmentNameResolver;
+
     private boolean supportsConstraintChecking = true;
 
     private final Map<String, Attribute> attributes = new LinkedHashMap<>();
@@ -489,7 +520,7 @@ public final class RuleClass {
           setPreferredDependencyPredicate(parent.preferredDependencyPredicate);
         }
         configurationFragments.addAll(parent.requiredConfigurationFragments);
-        failIfMissingConfigurationFragment |= parent.failIfMissingConfigurationFragment;
+        missingFragmentPolicy = parent.missingFragmentPolicy;
         supportsConstraintChecking = parent.supportsConstraintChecking;
 
         for (Attribute attribute : parent.getAttributes()) {
@@ -547,8 +578,8 @@ public final class RuleClass {
           workspaceOnly, outputsDefaultExecutable, implicitOutputsFunction, configurator,
           configuredTargetFactory, validityPredicate, preferredDependencyPredicate,
           ImmutableSet.copyOf(advertisedProviders), configuredTargetFunction,
-          externalBindingsFunction,
-          ruleDefinitionEnvironment, configurationFragments, failIfMissingConfigurationFragment,
+          externalBindingsFunction, ruleDefinitionEnvironment, configurationFragments,
+          requiredFragmentNames, fragmentNameResolver, missingFragmentPolicy,
           supportsConstraintChecking, attributes.values().toArray(new Attribute[0]));
     }
 
@@ -565,8 +596,23 @@ public final class RuleClass {
       return this;
     }
 
-    public Builder failIfMissingConfigurationFragment() {
-      this.failIfMissingConfigurationFragment = true;
+    /**
+     * Sets the policy for the case where the configuration is missing required fragments (see
+     * {@link #requiresConfigurationFragments}).
+     */
+    public Builder setMissingFragmentPolicy(MissingFragmentPolicy missingFragmentPolicy) {
+      this.missingFragmentPolicy = missingFragmentPolicy;
+      return this;
+    }
+    
+    /**
+     * Does the same as {@link #requiresConfigurationFragments(Class...)}, except for taking names
+     * of fragments instead of classes.
+     */
+    public Builder requiresConfigurationFragments(
+        FragmentClassNameResolver fragmentNameResolver, String... configurationFragmentNames) {
+      Collections.addAll(requiredFragmentNames, configurationFragmentNames);
+      this.fragmentNameResolver = fragmentNameResolver;
       return this;
     }
 
@@ -917,12 +963,20 @@ public final class RuleClass {
   private final ImmutableSet<Class<?>> requiredConfigurationFragments;
 
   /**
-   * Whether to fail during analysis if a configuration fragment is missing. The default behavior is
-   * to create fail actions for all declared outputs, i.e., to fail during execution, if any of the
-   * outputs is actually attempted to be built.
+   * Same idea as requiredConfigurationFragments, but stores fragments by name instead of by class
    */
-  private final boolean failIfMissingConfigurationFragment;
-
+  private final ImmutableSet<String> requiredConfigurationFragmentNames;
+  
+  /**
+   * Used to resolve the names of fragments in order to compare them to values in {@link
+   * #requiredConfigurationFragmentNames}
+   */
+  private final FragmentClassNameResolver fragmentNameResolver;
+  
+  /**
+   * What to do during analysis if a configuration fragment is missing.
+   */
+  private final MissingFragmentPolicy missingFragmentPolicy;
 
   /**
    * Determines whether instances of this rule should be checked for constraint compatibility
@@ -930,6 +984,53 @@ public final class RuleClass {
    * everything except for rules that are intrinsically incompatible with the constraint system.
    */
   private final boolean supportsConstraintChecking;
+
+  /**
+   * Helper constructor that skips allowedConfigurationFragmentNames and fragmentNameResolver
+   */
+  @VisibleForTesting
+  RuleClass(String name,
+      boolean skylarkExecutable,
+      boolean documented,
+      boolean publicByDefault,
+      boolean binaryOutput,
+      boolean workspaceOnly,
+      boolean outputsDefaultExecutable,
+      ImplicitOutputsFunction implicitOutputsFunction,
+      Configurator<?, ?> configurator,
+      ConfiguredTargetFactory<?, ?> configuredTargetFactory,
+      PredicateWithMessage<Rule> validityPredicate,
+      Predicate<String> preferredDependencyPredicate,
+      ImmutableSet<Class<?>> advertisedProviders,
+      @Nullable BaseFunction configuredTargetFunction,
+      Function<? super Rule, Map<String, Label>> externalBindingsFunction,
+      @Nullable SkylarkEnvironment ruleDefinitionEnvironment,
+      Set<Class<?>> allowedConfigurationFragments,
+      MissingFragmentPolicy missingFragmentPolicy,
+      boolean supportsConstraintChecking,
+      Attribute... attributes) {
+    this(name,
+        skylarkExecutable,
+        documented,
+        publicByDefault,
+        binaryOutput,
+        workspaceOnly,
+        outputsDefaultExecutable,
+        implicitOutputsFunction,
+        configurator,
+        configuredTargetFactory,
+        validityPredicate,
+        preferredDependencyPredicate,
+        advertisedProviders,
+        configuredTargetFunction,
+        externalBindingsFunction,
+        ruleDefinitionEnvironment,
+        allowedConfigurationFragments,
+        ImmutableSet.<String>of(), null,
+        missingFragmentPolicy,
+        supportsConstraintChecking,
+        attributes);
+  }
 
   /**
    * Constructs an instance of RuleClass whose name is 'name', attributes
@@ -965,7 +1066,10 @@ public final class RuleClass {
       @Nullable BaseFunction configuredTargetFunction,
       Function<? super Rule, Map<String, Label>> externalBindingsFunction,
       @Nullable SkylarkEnvironment ruleDefinitionEnvironment,
-      Set<Class<?>> allowedConfigurationFragments, boolean failIfMissingConfigurationFragment,
+      Set<Class<?>> allowedConfigurationFragments,
+      Set<String> allowedConfigurationFragmentNames,
+      @Nullable FragmentClassNameResolver fragmentNameResolver,
+      MissingFragmentPolicy missingFragmentPolicy,
       boolean supportsConstraintChecking,
       Attribute... attributes) {
     this.name = name;
@@ -988,7 +1092,10 @@ public final class RuleClass {
     this.workspaceOnly = workspaceOnly;
     this.outputsDefaultExecutable = outputsDefaultExecutable;
     this.requiredConfigurationFragments = ImmutableSet.copyOf(allowedConfigurationFragments);
-    this.failIfMissingConfigurationFragment = failIfMissingConfigurationFragment;
+    this.requiredConfigurationFragmentNames =
+        ImmutableSet.copyOf(allowedConfigurationFragmentNames);
+    this.fragmentNameResolver = fragmentNameResolver;
+    this.missingFragmentPolicy = missingFragmentPolicy;
     this.supportsConstraintChecking = supportsConstraintChecking;
 
     // create the index:
@@ -1148,18 +1255,31 @@ public final class RuleClass {
    */
   public boolean isLegalConfigurationFragment(Class<?> configurationFragment) {
     // For now, we allow all rules that don't declare allowed fragments to access any fragment.
-    // TODO(bazel-team): Declare fragment dependencies for all rules and remove this.
-    if (requiredConfigurationFragments.isEmpty()) {
+    // TODO(bazel-team): All built-in rules declare fragments, but Skylark rules don't.
+    if (requiredConfigurationFragments.isEmpty() && requiredConfigurationFragmentNames.isEmpty()) {
       return true;
     }
-    return requiredConfigurationFragments.contains(configurationFragment);
+    return requiredConfigurationFragments.contains(configurationFragment)
+        || hasLegalFragmentName(configurationFragment);
+  }
+
+  /**
+   * Checks whether the name of the given fragment class was declared as required fragment
+   */
+  private boolean hasLegalFragmentName(Class<?> configurationFragment) {
+    if (fragmentNameResolver == null) {
+      return false;
+    }
+
+    String name = fragmentNameResolver.resolveName(configurationFragment);
+    return (name != null && requiredConfigurationFragmentNames.contains(name));
   }
 
   /**
    * Whether to fail analysis if any of the required configuration fragments are missing.
    */
-  public boolean failIfMissingConfigurationFragment() {
-    return failIfMissingConfigurationFragment;
+  public MissingFragmentPolicy missingFragmentPolicy() {
+    return missingFragmentPolicy;
   }
 
   /**

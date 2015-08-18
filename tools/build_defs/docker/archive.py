@@ -61,8 +61,9 @@ class SimpleArFile(object):
       self.group_id = int(f.read(6).strip())
       self.mode = int(f.read(8).strip(), 8)
       self.size = int(f.read(10).strip())
-      if f.read(2) != '\x60\x0a':
-        raise self.ArError('Invalid AR file header')
+      pad = f.read(2)
+      if pad != '\x60\x0a':
+        raise SimpleArFile.ArError('Invalid AR file header')
       self.data = f.read(self.size)
 
   MAGIC_STRING = '!<arch>\n'
@@ -81,7 +82,12 @@ class SimpleArFile(object):
 
   def next(self):
     """Read the next file. Returns None when reaching the end of file."""
-    if self.f.tell() == os.fstat(self.f.fileno()).st_size:
+    # AR sections are two bit aligned using new lines.
+    if self.f.tell() % 2 != 0:
+      self.f.read(1)
+    # An AR sections is at least 60 bytes. Some file might contains garbage
+    # bytes at the end of the archive, ignore them.
+    if self.f.tell() > os.fstat(self.f.fileno()).st_size - 60:
       return None
     return self.SimpleArFileEntry(self.f)
 
@@ -161,30 +167,43 @@ class TarFileWriter(object):
       compression = 'gz'
     elif compression == 'bzip2':
       compression = 'bz2'
-    elif compression not in ['gz', 'bz2']:
-      # Unfortunately xz format isn't supported in py 2.7 :(
+    elif compression == 'lzma':
+      compression = 'xz'
+    elif compression not in ['gz', 'bz2', 'xz']:
       compression = ''
-    with tarfile.open(name=tar, mode='r:' + compression) as intar:
-      for tarinfo in intar:
-        if name_filter is None or name_filter(tarinfo.name):
-          tarinfo.mtime = 0
-          if rootuid is not None and tarinfo.uid == rootuid:
-            tarinfo.uid = 0
-            tarinfo.uname = 'root'
-          if rootgid is not None and tarinfo.gid == rootgid:
-            tarinfo.gid = 0
-            tarinfo.gname = 'root'
-          if numeric:
-            tarinfo.uname = ''
-            tarinfo.gname = ''
-          name = tarinfo.name
-          if not name.startswith('/') and not name.startswith('.'):
-            tarinfo.name = './' + name
+    if compression == 'xz':
+      # Python 2 does not support lzma, our py3 support is terrible so let's
+      # just hack around.
+      # Note that we buffer the file in memory and it can have an important
+      # memory footprint but it's probably fine as we don't use them for really
+      # large files.
+      # TODO(dmarting): once our py3 support gets better, compile this tools
+      # with py3 for proper lzma support.
+      f = StringIO(os.popen('cat %s | xzcat' % tar).read())
+      intar = tarfile.open(fileobj=f, mode='r:')
+    else:
+      intar = tarfile.open(name=tar, mode='r:' + compression)
+    for tarinfo in intar:
+      if name_filter is None or name_filter(tarinfo.name):
+        tarinfo.mtime = 0
+        if rootuid is not None and tarinfo.uid == rootuid:
+          tarinfo.uid = 0
+          tarinfo.uname = 'root'
+        if rootgid is not None and tarinfo.gid == rootgid:
+          tarinfo.gid = 0
+          tarinfo.gname = 'root'
+        if numeric:
+          tarinfo.uname = ''
+          tarinfo.gname = ''
+        name = tarinfo.name
+        if not name.startswith('/') and not name.startswith('.'):
+          tarinfo.name = './' + name
 
-          if tarinfo.isfile():
-            self.tar.addfile(tarinfo, intar.extractfile(tarinfo.name))
-          else:
-            self.tar.addfile(tarinfo)
+        if tarinfo.isfile():
+          self.tar.addfile(tarinfo, intar.extractfile(tarinfo.name))
+        else:
+          self.tar.addfile(tarinfo)
+    intar.close()
 
   def close(self):
     """Close the output tar file.

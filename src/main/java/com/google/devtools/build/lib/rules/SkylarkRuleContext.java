@@ -33,9 +33,9 @@ import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.FragmentCollection;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.packages.Attribute;
-import com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction.SkylarkImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.OutputFile;
@@ -94,6 +94,8 @@ public final class SkylarkRuleContext {
     });
 
   private final RuleContext ruleContext;
+  
+  private final FragmentCollection fragments;
 
   // TODO(bazel-team): support configurable attributes.
   private final SkylarkClassObject attrObject;
@@ -129,6 +131,7 @@ public final class SkylarkRuleContext {
    */
   public SkylarkRuleContext(RuleContext ruleContext) throws EvalException {
     this.ruleContext = Preconditions.checkNotNull(ruleContext);
+    fragments = new FragmentCollection(ruleContext);
 
     HashMap<String, Object> outputsBuilder = new HashMap<>();
     if (ruleContext.getRule().getRuleClassObject().outputsDefaultExecutable()) {
@@ -319,25 +322,24 @@ public final class SkylarkRuleContext {
     return ruleContext.getLabel();
   }
 
+  @SkylarkCallable(
+      name = "fragments", structField = true, doc = "Allows access to configuration fragments.")
+  public FragmentCollection getFragments() {
+    return fragments;
+  }
+
   @SkylarkCallable(name = "configuration", structField = true,
-      doc = "Returns the default configuration. See the <a href=\"#modules.configuration\">"
+      doc = "Returns the default configuration. See the <a href=\"configuration.html\">"
           + "configuration</a> type for more details.")
   public BuildConfiguration getConfiguration() {
     return ruleContext.getConfiguration();
   }
 
   @SkylarkCallable(name = "host_configuration", structField = true,
-      doc = "Returns the host configuration. See the <a href=\"#modules.configuration\">"
+      doc = "Returns the host configuration. See the <a href=\"configuration.html\">"
           + "configuration</a> type for more details.")
   public BuildConfiguration getHostConfiguration() {
     return ruleContext.getHostConfiguration();
-  }
-
-  @SkylarkCallable(name = "data_configuration", structField = true,
-      doc = "Returns the data configuration. See the <a href=\"#modules.configuration\">"
-          + "configuration</a> type for more details.")
-  public BuildConfiguration getDataConfiguration() {
-    return ruleContext.getConfiguration().getConfiguration(ConfigurationTransition.DATA);
   }
 
   @SkylarkCallable(structField = true,

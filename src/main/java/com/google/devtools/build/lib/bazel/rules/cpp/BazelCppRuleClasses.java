@@ -627,7 +627,6 @@ public class BazelCppRuleClasses {
     public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
       return builder
           .requiresConfigurationFragments(CppConfiguration.class)
-          .failIfMissingConfigurationFragment()
           /*<!-- #BLAZE_RULE(cc_binary).IMPLICIT_OUTPUTS -->
           <ul>
           <li><code><var>name</var>.stripped</code> (only built if explicitly requested): A stripped
@@ -700,6 +699,7 @@ public class BazelCppRuleClasses {
     @Override
     public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
       return builder
+          .requiresConfigurationFragments(CppConfiguration.class)
           .setImplicitOutputsFunction(CppRuleClasses.CC_BINARY_DEBUG_PACKAGE)
           .override(attr("linkstatic", BOOLEAN).value(false))
           .override(attr("stamp", TRISTATE).value(TriState.NO))
@@ -773,7 +773,6 @@ public class BazelCppRuleClasses {
           // deps, data, linkopts, defines, srcs; override here too?
 
           .requiresConfigurationFragments(CppConfiguration.class)
-          .failIfMissingConfigurationFragment()
           /*<!-- #BLAZE_RULE(cc_library).ATTRIBUTE(alwayslink) -->
           If 1, any binary that depends (directly or indirectly) on this C++
           library will link in all the object files for the files listed in

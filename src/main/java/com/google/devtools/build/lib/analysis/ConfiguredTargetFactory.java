@@ -40,9 +40,11 @@ import com.google.devtools.build.lib.packages.PackageGroupsRuleVisibility;
 import com.google.devtools.build.lib.packages.PackageSpecification;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
+import com.google.devtools.build.lib.packages.RuleClass.MissingFragmentPolicy;
 import com.google.devtools.build.lib.packages.RuleVisibility;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.rules.SkylarkRuleConfiguredTargetBuilder;
+import com.google.devtools.build.lib.rules.fileset.FilesetProvider;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.syntax.Label;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -178,7 +180,12 @@ public final class ConfiguredTargetFactory {
       TransitiveInfoCollection rule = targetContext.findDirectPrerequisite(
           outputFile.getGeneratingRule().getLabel(), config);
       if (isFileset) {
-        return new FilesetOutputConfiguredTarget(targetContext, outputFile, rule, artifact);
+        return new FilesetOutputConfiguredTarget(
+            targetContext,
+            outputFile,
+            rule,
+            artifact,
+            rule.getProvider(FilesetProvider.class).getTraversals());
       } else {
         return new OutputFileConfiguredTarget(targetContext, outputFile, rule, artifact);
       }
@@ -219,9 +226,12 @@ public final class ConfiguredTargetFactory {
       return null;
     }
     if (!rule.getRuleClassObject().getRequiredConfigurationFragments().isEmpty()) {
-      if (!configuration.hasAllFragments(
-          rule.getRuleClassObject().getRequiredConfigurationFragments())) {
-        if (rule.getRuleClassObject().failIfMissingConfigurationFragment()) {
+      MissingFragmentPolicy missingFragmentPolicy =
+          rule.getRuleClassObject().missingFragmentPolicy();
+      if (missingFragmentPolicy != MissingFragmentPolicy.IGNORE
+          && !configuration.hasAllFragments(
+              rule.getRuleClassObject().getRequiredConfigurationFragments())) {
+        if (missingFragmentPolicy == MissingFragmentPolicy.FAIL_ANALYSIS) {
           ruleContext.ruleError(missingFragmentError(ruleContext));
           return null;
         }

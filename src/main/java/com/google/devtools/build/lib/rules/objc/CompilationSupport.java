@@ -20,6 +20,7 @@ import static com.google.devtools.build.lib.rules.objc.ObjcProvider.FORCE_LOAD_L
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.FRAMEWORK_DIR;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.FRAMEWORK_FILE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.Flag.USES_CPP;
+import static com.google.devtools.build.lib.rules.objc.ObjcProvider.Flag.USES_FRAMEWORKS;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.Flag.USES_SWIFT;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.HEADER;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.IMPORTED_LIBRARY;
@@ -81,9 +82,10 @@ final class CompilationSupport {
   static final ImmutableList<String> LINKER_COVERAGE_FLAGS =
       ImmutableList.of("-ftest-coverage", "-fprofile-arcs");
 
+  // Flags for clang 6.1(xcode 6.4)
   @VisibleForTesting
   static final ImmutableList<String> CLANG_COVERAGE_FLAGS =
-      ImmutableList.of("-fprofile-arcs", "-ftest-coverage", "-fprofile-dir=./coverage_output");
+      ImmutableList.of("-fprofile-arcs", "-ftest-coverage");
 
   private static final String FRAMEWORK_SUFFIX = ".framework";
 
@@ -289,9 +291,15 @@ final class CompilationSupport {
       .addExecPath("-o", objFile)
       .addExecPath("-emit-module-path", intermediateArtifacts.swiftModuleFile(sourceFile));
 
-    // Add all ObjC headers to the compiler, in case Swift code is calling into Objc
-    // TODO(bazel-team): This can be augmented by an explicit bridging header field in the rule.
-    commandLine.addBeforeEachExecPath("-import-objc-header", attributes.hdrs());
+
+    ImmutableList.Builder<Artifact> inputHeaders = ImmutableList.builder();
+    inputHeaders.addAll(attributes.hdrs());
+
+    Optional<Artifact> bridgingHeader = attributes.bridgingHeader();
+    if (bridgingHeader.isPresent()) {
+      commandLine.addExecPath("-import-objc-header", bridgingHeader.get());
+      inputHeaders.add(bridgingHeader.get());
+    }
 
     ruleContext.registerAction(ObjcRuleClasses.spawnOnDarwinActionBuilder()
         .setMnemonic("SwiftCompile")
@@ -299,7 +307,7 @@ final class CompilationSupport {
         .setCommandLine(commandLine.build())
         .addInput(sourceFile)
         .addInputs(otherSwiftSources)
-        .addInputs(attributes.hdrs())
+        .addInputs(inputHeaders.build())
         .addOutput(objFile)
         .addOutput(intermediateArtifacts.swiftModuleFile(sourceFile))
         .build(ruleContext));
@@ -535,8 +543,12 @@ final class CompilationSupport {
     }
 
     if (objcProvider.is(USES_SWIFT)) {
+      commandLine.add("-L").add(IosSdkCommands.swiftLibDir(objcConfiguration));
+    }
+
+    if (objcProvider.is(USES_SWIFT) || objcProvider.is(USES_FRAMEWORKS)) {
+      // Enable loading bundled frameworks.
       commandLine
-          .add("-L").add(IosSdkCommands.swiftLibDir(objcConfiguration))
           .add("-Xlinker").add("-rpath")
           .add("-Xlinker").add("@executable_path/Frameworks");
     }

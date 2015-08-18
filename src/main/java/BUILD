@@ -315,6 +315,7 @@ java_library(
     deps = [
         ":analysis-exec-rules-skyframe",
         ":common",
+        ":concurrent",
         ":packages",
         ":vfs",
         "//third_party:apache_velocity",
@@ -525,7 +526,7 @@ filegroup(
 java_library(
     name = "docgen_javalib",
     srcs = glob(
-        ["com/google/devtools/build/docgen/*.java"],
+        ["com/google/devtools/build/docgen/**/*.java"],
         exclude = [
             "com/google/devtools/build/docgen/BuildEncyclopediaGenerator.java",
             "com/google/devtools/build/docgen/SkylarkDocumentationGenerator.java",
@@ -539,6 +540,7 @@ java_library(
         ":analysis-exec-rules-skyframe",
         ":bazel-core",
         ":common",
+        ":concurrent",
         ":packages",
         ":vfs",
         "//third_party:apache_velocity",
@@ -586,8 +588,10 @@ genrule(
 
 genrule(
     name = "gen_skylarklibrary",
-    outs = ["skylark-library.html"],
-    cmd = "$(location :skydoc_bin) $@",
+    outs = ["skylark-library.zip"],
+    cmd = "mkdir -p $(@D)/skylark-lib &&" +
+          "$(location :skydoc_bin) $(@D)/skylark-lib &&" +
+          "zip -qj $@ $(@D)/skylark-lib/*",
     tools = [":skydoc_bin"],
 )
 

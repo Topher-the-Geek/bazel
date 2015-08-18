@@ -17,9 +17,8 @@ java_library(
         ":rule",
         "//src/main/java:events",
         "//src/main/java:maven-connector",
-        "//src/main/java:vfs",
-        "//third_party:aether",
         "//third_party:guava",
+        "//third_party:jsr305",
         "//third_party:maven_model",
         "//third_party:plexus_component_annotations",
     ],
@@ -32,7 +31,9 @@ java_library(
         "//src/main/java/com/google/devtools/build:__subpackages__",
     ],
     deps = [
+        "//src/main/java:maven-connector",
         "//third_party:aether",
         "//third_party:guava",
+        "//third_party:maven_model",
     ],
 )

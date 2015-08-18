@@ -41,11 +41,13 @@ public class ObjcProtoLibraryRule implements RuleDefinition {
   static final String OPTIONS_FILE_ATTR = "options_file";
   static final String OUTPUT_CPP_ATTR = "output_cpp";
   static final String USE_OBJC_HEADER_NAMES_ATTR = "use_objc_header_names";
+  static final String PER_PROTO_INCLUDES = "per_proto_includes";
   static final String LIBPROTOBUF_ATTR = "$lib_protobuf";
 
   @Override
   public RuleClass build(Builder builder, final RuleDefinitionEnvironment env) {
     return builder
+        .requiresConfigurationFragments(ObjcConfiguration.class)
         /* <!-- #BLAZE_RULE(objc_proto_library).ATTRIBUTE(deps) -->
         The directly depended upon proto_library rules.
         ${SYNOPSIS}
@@ -66,6 +68,12 @@ public class ObjcProtoLibraryRule implements RuleDefinition {
         .add(attr(OUTPUT_CPP_ATTR, BOOLEAN).value(false))
         /* <!-- #BLAZE_RULE(objc_proto_library).ATTRIBUTE(use_objc_header_names) -->
         If true, output headers with .pbobjc.h, rather than .pb.h.
+        ${SYNOPSIS}
+        <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+        .add(attr(PER_PROTO_INCLUDES, BOOLEAN).value(false))
+        /* <!-- #BLAZE_RULE(objc_proto_library).ATTRIBUTE(per_proto_includes) -->
+        If true, always add all directories to objc_library includes,
+        overriding --noobjc_per_proto_includes.
         ${SYNOPSIS}
         <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
         .add(attr(COMPILE_PROTOS_ATTR, LABEL)

@@ -458,32 +458,20 @@ public class PackageFunction implements SkyFunction {
           packageId, e.getMessage()), Transience.TRANSIENT);
     }
 
-    StoredEventHandler eventHandler = new StoredEventHandler();
-    BuildFileAST buildFileAST = BuildFileAST.parseBuildFile(
-          inputSource, preludeStatements, eventHandler, null, true);
-
-    SkylarkImportResult importResult;
-    boolean includeRepositoriesFetched;
-    if (eventHandler.hasErrors()) {
-      // In case of Python preprocessing, errors have already been reported (see checkSyntax).
-      // In other cases, errors will be reported later.
-      // TODO(bazel-team): maybe we could get rid of checkSyntax and always report errors here?
-      importResult = new SkylarkImportResult(
-          ImmutableMap.<PathFragment, SkylarkEnvironment>of(), ImmutableList.<Label>of());
-      includeRepositoriesFetched = true;
-    } else {
-      importResult = fetchImportsFromBuildFile(buildFilePath, buildFileFragment,
-          packageId, buildFileAST, env);
-      includeRepositoriesFetched = fetchIncludeRepositoryDeps(env, buildFileAST);
-    }
-
-    if (importResult == null || !includeRepositoriesFetched) {
+    Package.LegacyBuilder legacyPkgBuilder =
+        loadPackage(
+            externalPkg,
+            inputSource,
+            replacementContents,
+            packageId,
+            buildFilePath,
+            buildFileFragment,
+            defaultVisibility,
+            preludeStatements,
+            env);
+    if (legacyPkgBuilder == null) {
       return null;
     }
-
-    Package.LegacyBuilder legacyPkgBuilder = loadPackage(externalPkg, inputSource,
-        replacementContents, packageId, buildFilePath, defaultVisibility, preludeStatements,
-        importResult);
     legacyPkgBuilder.buildPartial();
     try {
       handleLabelsCrossingSubpackagesAndPropagateInconsistentFilesystemExceptions(
@@ -527,6 +515,9 @@ public class PackageFunction implements SkyFunction {
     return new PackageValue(pkg);
   }
 
+  /**
+   * Returns true if includes referencing a different repository have already been computed.
+   */
   private boolean fetchIncludeRepositoryDeps(Environment env, BuildFileAST ast) {
     boolean ok = true;
     for (Label label : ast.getIncludes()) {
@@ -543,17 +534,63 @@ public class PackageFunction implements SkyFunction {
     return ok;
   }
 
-  private SkylarkImportResult fetchImportsFromBuildFile(Path buildFilePath,
-      PathFragment buildFileFragment, PackageIdentifier packageIdentifier,
-      BuildFileAST buildFileAST, Environment env)
+  // TODO(bazel-team): this should take the AST so we don't parse the file twice.
+  @Nullable
+  private SkylarkImportResult discoverSkylarkImports(
+      Path buildFilePath,
+      PathFragment buildFileFragment,
+      PackageIdentifier packageId,
+      Environment env,
+      ParserInputSource inputSource,
+      List<Statement> preludeStatements)
+      throws PackageFunctionException {
+    StoredEventHandler eventHandler = new StoredEventHandler();
+    BuildFileAST buildFileAST =
+        BuildFileAST.parseBuildFile(
+            inputSource,
+            preludeStatements,
+            eventHandler,
+            /* package locator */ null,
+            /* parse python */ false);
+    SkylarkImportResult importResult;
+    boolean includeRepositoriesFetched;
+    if (eventHandler.hasErrors()) {
+      importResult =
+          new SkylarkImportResult(
+              ImmutableMap.<PathFragment, SkylarkEnvironment>of(), ImmutableList.<Label>of());
+      includeRepositoriesFetched = true;
+    } else {
+      importResult =
+          fetchImportsFromBuildFile(buildFilePath, buildFileFragment, packageId, buildFileAST, env);
+      includeRepositoriesFetched = fetchIncludeRepositoryDeps(env, buildFileAST);
+    }
+
+    if (!includeRepositoriesFetched) {
+      return null;
+    }
+
+    return importResult;
+  }
+
+  /**
+   * Fetch the skylark loads for this BUILD file. If any of them haven't been computed yet,
+   * returns null.
+   */
+  @Nullable
+  private SkylarkImportResult fetchImportsFromBuildFile(
+      Path buildFilePath,
+      PathFragment buildFileFragment,
+      PackageIdentifier packageId,
+      BuildFileAST buildFileAST,
+      Environment env)
       throws PackageFunctionException {
     ImmutableCollection<PathFragment> imports = buildFileAST.getImports();
     Map<PathFragment, SkylarkEnvironment> importMap = new HashMap<>();
     ImmutableList.Builder<SkylarkFileDependency> fileDependencies = ImmutableList.builder();
     try {
       for (PathFragment importFile : imports) {
-        SkyKey importsLookupKey = SkylarkImportLookupValue.key(
-            packageIdentifier.getRepository(), buildFileFragment, importFile);
+        SkyKey importsLookupKey =
+            SkylarkImportLookupValue.key(packageId.getRepository(), buildFileFragment, importFile);
         SkylarkImportLookupValue importLookupValue = (SkylarkImportLookupValue)
             env.getValueOrThrow(importsLookupKey, SkylarkImportFailedException.class,
                 InconsistentFilesystemException.class, ASTLookupInputException.class,
@@ -565,15 +602,15 @@ public class PackageFunction implements SkyFunction {
       }
     } catch (SkylarkImportFailedException e) {
       env.getListener().handle(Event.error(Location.fromFile(buildFilePath), e.getMessage()));
-      throw new PackageFunctionException(new BuildFileContainsErrorsException(packageIdentifier,
-          e.getMessage()), Transience.PERSISTENT);
+      throw new PackageFunctionException(
+          new BuildFileContainsErrorsException(packageId, e.getMessage()), Transience.PERSISTENT);
     } catch (InconsistentFilesystemException e) {
-      throw new PackageFunctionException(new InternalInconsistentFilesystemException(
-          packageIdentifier, e), Transience.PERSISTENT);
+      throw new PackageFunctionException(
+          new InternalInconsistentFilesystemException(packageId, e), Transience.PERSISTENT);
     } catch (ASTLookupInputException e) {
       // The load syntax is bad in the BUILD file so BuildFileContainsErrorsException is OK.
-      throw new PackageFunctionException(new BuildFileContainsErrorsException(packageIdentifier,
-          e.getMessage()), Transience.PERSISTENT);
+      throw new PackageFunctionException(
+          new BuildFileContainsErrorsException(packageId, e.getMessage()), Transience.PERSISTENT);
     } catch (BuildFileNotFoundException e) {
       throw new PackageFunctionException(e, Transience.PERSISTENT);
     }
@@ -701,7 +738,8 @@ public class PackageFunction implements SkyFunction {
       // The label does not cross a subpackage boundary.
       return false;
     }
-    if (!containingPkg.getPackageFragment().startsWith(label.getPackageFragment())) {
+    if (!containingPkg.getPathFragment().startsWith(
+        label.getPackageIdentifier().getPathFragment())) {
       // This label is referencing an imaginary package, because the containing package should
       // extend the label's package: if the label is //a/b:c/d, the containing package could be
       // //a/b/c or //a/b, but should never be //a. Usually such errors will be caught earlier, but
@@ -731,12 +769,21 @@ public class PackageFunction implements SkyFunction {
   /**
    * Constructs a {@link Package} object for the given package using legacy package loading.
    * Note that the returned package may be in error.
+   *
+   * <p>May return null if the computation has to be restarted.
    */
-  private Package.LegacyBuilder loadPackage(Package externalPkg,
-      ParserInputSource inputSource, @Nullable String replacementContents,
-      PackageIdentifier packageId, Path buildFilePath, RuleVisibility defaultVisibility,
-      List<Statement> preludeStatements, SkylarkImportResult importResult)
-          throws InterruptedException {
+  @Nullable
+  private Package.LegacyBuilder loadPackage(
+      Package externalPkg,
+      ParserInputSource inputSource,
+      @Nullable String replacementContents,
+      PackageIdentifier packageId,
+      Path buildFilePath,
+      PathFragment buildFileFragment,
+      RuleVisibility defaultVisibility,
+      List<Statement> preludeStatements,
+      Environment env)
+      throws InterruptedException, PackageFunctionException {
     ParserInputSource replacementSource = replacementContents == null ? null
         : ParserInputSource.create(replacementContents, buildFilePath.asFragment());
     Package.LegacyBuilder pkgBuilder = packageFunctionCache.getIfPresent(packageId);
@@ -750,6 +797,19 @@ public class PackageFunction implements SkyFunction {
             ? packageFactory.preprocess(packageId, buildFilePath, inputSource, globber,
                 localReporter)
                 : Preprocessor.Result.noPreprocessing(replacementSource);
+
+        SkylarkImportResult importResult =
+            discoverSkylarkImports(
+                buildFilePath,
+                buildFileFragment,
+                packageId,
+                env,
+                preprocessingResult.result,
+                preludeStatements);
+        if (importResult == null) {
+          return null;
+        }
+
         pkgBuilder = packageFactory.createPackageFromPreprocessingResult(externalPkg, packageId,
             buildFilePath, preprocessingResult, localReporter.getEvents(), preludeStatements,
             importResult.importMap, importResult.fileDependencies, packageLocator,

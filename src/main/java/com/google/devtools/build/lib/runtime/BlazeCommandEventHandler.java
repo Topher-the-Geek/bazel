@@ -13,7 +13,6 @@
 // limitations under the License.
 package com.google.devtools.build.lib.runtime;
 
-import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.EventKind;
@@ -31,12 +30,16 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.util.EnumSet;
 import java.util.Set;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * BlazeCommandEventHandler: an event handler established for the duration of a
  * single Blaze command.
  */
 public class BlazeCommandEventHandler implements EventHandler {
+
+  private static final Logger LOG = Logger.getLogger(BlazeCommandEventHandler.class.getName());
 
   public enum UseColor { YES, NO, AUTO }
   public enum UseCurses { YES, NO, AUTO }
@@ -243,10 +246,10 @@ public class BlazeCommandEventHandler implements EventHandler {
       out.write(event.getMessageBytes());
       out.flush();
     } catch (IOException e) {
-      // This can happen in server mode if the blaze client has exited,
-      // or if output is redirected to a file and the disk is full, etc.
-      // TODO(bazel-team): Maybe crash here after gathering some data on how common this is.
-      BugReport.sendBugReport(e, ImmutableList.of("Failed to write event"));
+      // This can happen in server mode if the blaze client has exited, or if output is redirected
+      // to a file and the disk is full, etc. May be moot in the case of full disk, or useful in
+      // the case of real bug in our handling of streams.
+      LOG.log(Level.WARNING, "Failed to write event", e);
     }
   }
 

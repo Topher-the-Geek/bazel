@@ -14,6 +14,7 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
+import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.rules.objc.CompilationSupport.ExtraLinkArgs;
 
 /**
@@ -21,8 +22,11 @@ import com.google.devtools.build.lib.rules.objc.CompilationSupport.ExtraLinkArgs
  */
 public class IosExtensionBinary extends BinaryLinkingTargetFactory {
   public IosExtensionBinary() {
-    super(HasReleaseBundlingSupport.NO,
-        new ExtraLinkArgs("-e", "_NSExtensionMain", "-fapplication-extension"),
-        XcodeProductType.LIBRARY_STATIC);
+    super(HasReleaseBundlingSupport.NO, XcodeProductType.LIBRARY_STATIC);
+  }
+
+  @Override
+  protected ExtraLinkArgs getExtraLinkArgs(RuleContext ruleContext) {
+    return new ExtraLinkArgs("-e", "_NSExtensionMain", "-fapplication-extension");
   }
 }

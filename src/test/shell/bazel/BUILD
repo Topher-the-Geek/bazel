@@ -37,6 +37,7 @@ filegroup(
     name = "test-deps",
     testonly = 1,
     srcs = [
+        "remote_helpers.sh",
         "test-setup.sh",
         "testenv.sh",
         ":langtools-copy",
@@ -157,12 +158,24 @@ sh_test(
 )
 
 sh_test(
-    name = "workspace_test",
-    srcs = ["workspace_test.sh"],
+    name = "maven_test",
+    srcs = ["maven_test.sh"],
+    data = [":test-deps"],
+)
+
+sh_test(
+    name = "generate_workspace_test",
+    srcs = ["generate_workspace_test.sh"],
     data = [
         ":test-deps",
         "//src/main/java/com/google/devtools/build/workspace:generate_workspace",
     ],
+)
+
+sh_test(
+    name = "workspace_test",
+    srcs = ["workspace_test.sh"],
+    data = [":test-deps"],
 )
 
 sh_test(
